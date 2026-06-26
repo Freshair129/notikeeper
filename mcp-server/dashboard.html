@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NotiKeeper Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sarabun:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#0F1B2D; --ink-2:#15243A; --sky:#5EC1FF; --gold:#FFC857; --paper:#E6EEF8; --paper-2:#C8D5E5; --muted:#8FA4BC; }
+  body { font-family:'Sarabun','Inter',sans-serif; background:var(--ink); color:var(--paper); }
+  .mono { font-family:'JetBrains Mono', monospace; }
+  ::selection { background: var(--sky); color: var(--ink); }
+  .pulse-dot { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.35 } }
+  .row-enter { animation: slideIn .35s ease-out; }
+  @keyframes slideIn { from { opacity:0; transform: translateY(-6px) } to { opacity:1; transform:none } }
+</style>
+</head>
+<body class="min-h-screen">
+  <header class="sticky top-0 z-20 backdrop-blur-xl bg-[#0F1B2D]/80 border-b border-white/5">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-[#1B3A66] grid place-items-center">
+          <span class="text-[#5EC1FF] text-lg">🔔</span>
+        </div>
+        <div>
+          <div class="font-semibold leading-tight">NotiKeeper</div>
+          <div class="text-xs text-[var(--muted)] leading-tight">Dashboard</div>
+        </div>
+        <div id="live-pill" class="ml-3 inline-flex items-center gap-2 text-xs px-2.5 py-1 rounded-full border border-white/10">
+          <span id="live-dot" class="w-1.5 h-1.5 rounded-full bg-[var(--muted)] pulse-dot"></span>
+          <span id="live-label" class="text-[var(--muted)]">connecting…</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 text-xs">
+        <span class="text-[var(--muted)]">รวม</span>
+        <span id="total-pill" class="mono px-2 py-1 rounded bg-white/5 border border-white/10 text-white">0</span>
+        <span class="text-[var(--muted)]">ข้อความ</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+    <!-- Controls -->
+    <section class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+      <div class="grid gap-3 sm:grid-cols-[1fr_180px_140px_auto]">
+        <input id="q" type="text" placeholder="ค้นหา (แอป / ผู้ส่ง / ข้อความ)"
+          class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-4 py-2.5 text-sm placeholder-[var(--muted)] focus:outline-none focus:border-[var(--sky)]/50" />
+        <select id="app-filter" class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-[var(--sky)]/50">
+          <option value="">ทุกแอป</option>
+        </select>
+        <select id="source-filter" class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-[var(--sky)]/50">
+          <option value="">ทุก source</option>
+          <option value="noti">แจ้งเตือน</option>
+          <option value="screen">หน้าจอ</option>
+        </select>
+        <button id="reload" class="rounded-xl bg-[var(--sky)] text-[var(--ink)] font-semibold px-5 py-2.5 text-sm hover:bg-[#9AD5FF] transition">โหลดใหม่</button>
+      </div>
+      <div class="mt-3 flex items-center gap-2 flex-wrap text-xs">
+        <button data-claude="recent_messages from LINE limit 20" class="claude-quick px-3 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition">💬 ถาม Claude: LINE ล่าสุด</button>
+        <button data-claude="search_messages for the word 'address' in notikeeper" class="claude-quick px-3 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition">🔍 ค้นคำว่า "address"</button>
+        <button data-claude="give me notikeeper stats and the top 5 apps by message count" class="claude-quick px-3 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition">📊 สถิติ + top apps</button>
+        <span class="text-[var(--muted)] ml-auto">คลิกเพื่อก๊อปคำสั่งให้วางใน Claude Desktop</span>
+      </div>
+    </section>
+
+    <!-- Stats -->
+    <section id="stats-grid" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"></section>
+
+    <!-- Messages -->
+    <section class="bg-white/[0.03] border border-white/10 rounded-2xl">
+      <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+        <h2 class="font-semibold">ข้อความล่าสุด</h2>
+        <span id="shown-pill" class="text-xs text-[var(--muted)]">—</span>
+      </div>
+      <div id="rows" class="divide-y divide-white/5 max-h-[60vh] overflow-y-auto"></div>
+    </section>
+
+    <footer class="text-xs text-[var(--muted)] text-center py-4">
+      อ่านจาก <span class="mono">data.jsonl</span> · update real-time ผ่าน SSE ·
+      <a href="https://notikeeper.vercel.app" target="_blank" class="text-[var(--sky)] hover:underline">notikeeper.vercel.app</a>
+    </footer>
+  </main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const rowsEl = $("#rows");
+const totalPill = $("#total-pill");
+const shownPill = $("#shown-pill");
+const statsGrid = $("#stats-grid");
+const appFilter = $("#app-filter");
+const liveDot = $("#live-dot");
+const liveLabel = $("#live-label");
+
+const fmtTime = (ms) => {
+  const d = new Date(ms);
+  const today = new Date();
+  const same = d.toDateString() === today.toDateString();
+  const t = d.toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit' });
+  return same ? t : d.toLocaleDateString('th-TH', { day:'2-digit', month:'short' }) + ' ' + t;
+};
+
+const escapeHtml = (s) => (s||'').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const highlight = (text, q) => {
+  if (!q) return escapeHtml(text);
+  const re = new RegExp(q.replace(/[-/\\^$*+?.()|[\]{}]/g,'\\$&'), 'gi');
+  return escapeHtml(text).replace(new RegExp(re.source, 'gi'), m => `<mark class="bg-[var(--gold)]/30 text-[var(--gold)] rounded px-0.5">${m}</mark>`);
+};
+
+const renderRow = (r, q='') => {
+  const tag = r.source === 'screen'
+    ? (r.side === 'me' ? 'หน้าจอ · ฉัน' : 'หน้าจอ · เขา')
+    : 'แจ้งเตือน';
+  const tagColor = r.source === 'screen'
+    ? 'bg-[var(--gold)]/15 text-[var(--gold)]'
+    : 'bg-[var(--sky)]/15 text-[var(--sky)]';
+  return `
+    <div class="row-enter px-4 py-3 hover:bg-white/[0.02]">
+      <div class="flex items-center justify-between text-xs mb-1">
+        <div class="flex items-center gap-2">
+          <span class="font-semibold text-white">${escapeHtml(r.app)}</span>
+          <span class="px-2 py-0.5 rounded-full text-[10px] ${tagColor}">${tag}</span>
+        </div>
+        <span class="text-[var(--muted)] mono">${fmtTime(r.time)}</span>
+      </div>
+      ${r.title ? `<div class="text-sm font-medium text-[var(--paper)]">${highlight(r.title, q)}</div>` : ''}
+      <div class="text-sm text-[var(--paper-2)] mt-0.5">${highlight(r.text, q)}</div>
+    </div>`;
+};
+
+const renderStats = (s) => {
+  const tile = (label, value, sub='') => `
+    <div class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+      <div class="text-xs uppercase tracking-wider text-[var(--muted)]">${label}</div>
+      <div class="mt-1 text-2xl font-bold text-white">${value}</div>
+      ${sub ? `<div class="text-xs text-[var(--paper-2)] mt-1">${sub}</div>` : ''}
+    </div>`;
+  const topApp = Object.entries(s.byApp||{})[0];
+  const range = s.minTime && s.maxTime
+    ? `${new Date(s.minTime).toLocaleDateString('th-TH')} → ${new Date(s.maxTime).toLocaleDateString('th-TH')}`
+    : '—';
+  statsGrid.innerHTML = [
+    tile('ข้อความรวม', s.total.toLocaleString()),
+    tile('แอปบนสุด', topApp ? topApp[0] : '—', topApp ? `${topApp[1]} ข้อความ` : ''),
+    tile('แจ้งเตือน / หน้าจอ', `${(s.bySource?.noti||0)} / ${(s.bySource?.screen||0)}`),
+    tile('ช่วงเวลา', range),
+  ].join('');
+};
+
+let currentQuery = '';
+async function loadAll() {
+  currentQuery = $("#q").value.trim();
+  const params = new URLSearchParams();
+  if (currentQuery) params.set('q', currentQuery);
+  if (appFilter.value) params.set('app', appFilter.value);
+  if ($("#source-filter").value) params.set('source', $("#source-filter").value);
+  params.set('limit', '500');
+
+  const [msgRes, statRes] = await Promise.all([
+    fetch('/api/messages?' + params),
+    fetch('/api/stats'),
+  ]);
+  const msg = await msgRes.json();
+  const stat = await statRes.json();
+
+  // Populate app filter once we know the apps
+  const have = new Set(Array.from(appFilter.options).map(o => o.value));
+  for (const a of Object.keys(stat.byApp || {})) {
+    if (!have.has(a)) {
+      const opt = document.createElement('option');
+      opt.value = a; opt.textContent = `${a} (${stat.byApp[a]})`;
+      appFilter.append(opt);
+    }
+  }
+
+  totalPill.textContent = stat.total.toLocaleString();
+  shownPill.textContent = `แสดง ${msg.total.toLocaleString()} / ${msg.all.toLocaleString()}`;
+  renderStats(stat);
+  rowsEl.innerHTML = msg.rows.map(r => renderRow(r, currentQuery)).join('') || `
+    <div class="px-4 py-10 text-center text-[var(--muted)]">ไม่มีข้อความตรงเงื่อนไข</div>`;
+}
+
+// Wire UI
+$("#reload").addEventListener('click', loadAll);
+let debounce;
+$("#q").addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadAll, 200); });
+appFilter.addEventListener('change', loadAll);
+$("#source-filter").addEventListener('change', loadAll);
+
+// Claude quick prompts: copy to clipboard + try Claude Desktop deeplink
+document.querySelectorAll('.claude-quick').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const prompt = btn.dataset.claude;
+    try { await navigator.clipboard.writeText(prompt); } catch {}
+    const old = btn.innerHTML;
+    btn.innerHTML = '✓ ก๊อปแล้ว — วางใน Claude';
+    setTimeout(() => btn.innerHTML = old, 1800);
+  });
+});
+
+// SSE — push live updates when new ingest arrives
+function connectSSE() {
+  const es = new EventSource('/events');
+  es.addEventListener('hello', () => {
+    liveDot.className = 'w-1.5 h-1.5 rounded-full bg-[var(--sky)] pulse-dot';
+    liveLabel.textContent = 'live';
+    liveLabel.className = 'text-[var(--sky)]';
+  });
+  es.addEventListener('new', () => loadAll());
+  es.onerror = () => {
+    liveDot.className = 'w-1.5 h-1.5 rounded-full bg-red-400';
+    liveLabel.textContent = 'reconnecting…';
+    liveLabel.className = 'text-red-400';
+    setTimeout(() => { es.close(); connectSSE(); }, 3000);
+  };
+}
+
+loadAll();
+connectSSE();
+</script>
+</body>
+</html>
