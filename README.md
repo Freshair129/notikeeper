@@ -1,5 +1,8 @@
 # NotiKeeper
 
+> ดู [`CHANGELOG.md`](CHANGELOG.md) สำหรับประวัติเวอร์ชัน · [`ARCHITECTURE.md`](ARCHITECTURE.md) อธิบายโครงระบบ · [`SECURITY.md`](SECURITY.md) อธิบาย threat model + การเข้ารหัส · [`RELEASE.md`](RELEASE.md) วิธีปล่อยรุ่นใหม่ · [`CLAUDE.md`](CLAUDE.md) บริบทสำหรับ AI ที่เปิด repo นี้ · [`LICENSE`](LICENSE) MIT
+
+
 แอป Android ที่ **บันทึกข้อความ/การแจ้งเตือน** (เน้น Messenger) ลงฐานข้อมูลในเครื่องแบบถาวร
 แก้ปัญหาที่ระบบเก็บประวัติแจ้งเตือนไว้แค่ ~24 ชั่วโมง — ตัวนี้เก็บไม่จำกัด และค้นหาย้อนหลังได้
 
