@@ -5,6 +5,14 @@ All notable changes to NotiKeeper. Format follows
 [SemVer](https://semver.org/) where `versionCode` increments monotonically per
 release.
 
+## [Unreleased]
+### Added
+- iOS companion app scaffold under `ios/NotiKeeperIOS` for importing,
+  searching, reading aloud, and exporting NotiKeeper archive data on iPhone.
+- iOS companion PRD documenting the platform boundary: iOS can view/import
+  exported archives, but cannot capture other apps' notifications or screen
+  content like the Android app.
+
 ## [1.6] — 2026-06-26
 ### Added
 - Adaptive launcher icon (vector bell + lock, navy / blue / gold).

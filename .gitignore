@@ -12,6 +12,19 @@ captures/
 mcp-server/node_modules/
 mcp-server/data.jsonl
 
+# Landing page (Vite)
+landing/node_modules/
+landing/dist/
+landing/.vite/
+
+# iOS / Xcode
+ios/**/build/
+ios/**/DerivedData/
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+*.ipa
+*.xcarchive
+
 # IDE / OS
 .idea/
 *.iml
