@@ -13,15 +13,18 @@ import {
   ArrowRight,
   Menu,
   X,
+  Apple,
 } from 'lucide-react';
 
 const REPO = 'https://github.com/Freshair129/notikeeper';
 const LATEST_APK = `${REPO}/releases/latest/download/NotiKeeper.apk`;
 const VERSION_URL = `${REPO}/releases/latest/download/version.json`;
+const IOS_SRC = `${REPO}/tree/main/ios/NotiKeeperIOS`;
 
 const navLinks = [
   { href: '#features', label: 'ฟีเจอร์' },
   { href: '#security', label: 'ความปลอดภัย' },
+  { href: '#download', label: 'ดาวน์โหลด' },
   { href: '#install', label: 'ติดตั้ง' },
   { href: '#docs', label: 'เอกสาร' },
 ];
@@ -232,8 +235,15 @@ function App() {
               href={LATEST_APK}
               className="inline-flex items-center gap-2 rounded-full bg-[var(--sky)] px-6 py-3.5 text-sm font-semibold text-[var(--ink)] hover:bg-[var(--sky-soft)] transition"
             >
-              <Download className="h-4 w-4" />
-              ดาวน์โหลด APK ล่าสุด
+              <Smartphone className="h-4 w-4" />
+              Android — ดาวน์โหลด APK
+            </a>
+            <a
+              href="#download"
+              className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-6 py-3.5 text-sm font-semibold hover:bg-white/10 transition"
+            >
+              <Apple className="h-4 w-4" />
+              iOS — companion viewer
             </a>
             <a
               href={REPO}
@@ -242,7 +252,7 @@ function App() {
               className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-6 py-3.5 text-sm font-semibold hover:bg-white/10 transition"
             >
               <GitFork className="h-4 w-4" />
-              ดูซอร์สโค้ดบน GitHub
+              GitHub
             </a>
           </div>
 
@@ -344,6 +354,102 @@ function App() {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* Download */}
+      <section id="download" className="py-20 sm:py-28">
+        <div className="mx-auto max-w-6xl px-6">
+          <div className="max-w-2xl">
+            <p className="text-xs uppercase tracking-[0.2em] text-[var(--sky)]">ดาวน์โหลด</p>
+            <h2 className="display mt-2 text-3xl sm:text-5xl font-bold leading-tight">
+              เลือกแพลตฟอร์มของคุณ
+            </h2>
+            <p className="mt-4 text-[var(--paper-2)]">
+              Android เป็นตัวหลักที่ทำ capture ได้เต็มที่ — iOS เป็น companion สำหรับ
+              เปิดดู / ค้นหา / อ่านออกเสียงไฟล์ archive ที่ export ออกมาจาก Android
+            </p>
+          </div>
+          <div className="mt-12 grid gap-4 md:grid-cols-2">
+            {/* Android card */}
+            <div className="relative overflow-hidden rounded-2xl border border-[var(--sky)]/30 bg-gradient-to-br from-[var(--sky)]/10 to-transparent p-6 sm:p-8">
+              <div className="flex items-start justify-between">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--sky)]/20 text-[var(--sky)]">
+                  <Smartphone className="h-6 w-6" />
+                </div>
+                <span className="rounded-full bg-[var(--sky)]/15 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--sky)]">
+                  พร้อมใช้งาน · v1.6
+                </span>
+              </div>
+              <h3 className="display mt-5 text-2xl font-bold text-white">Android</h3>
+              <p className="mt-2 text-sm text-[var(--paper-2)] leading-relaxed">
+                ดักจับแจ้งเตือนทุกแอป + อ่านบทสนทนาบนจอ Messenger / LINE / IG / WhatsApp / Telegram
+                เก็บลง DB เข้ารหัสในเครื่อง + อ่านออกเสียงสำหรับคนขับรถ
+              </p>
+              <ul className="mt-4 space-y-1.5 text-xs text-[var(--paper-2)]">
+                <li>• Android 11 ขึ้นไป (API 30+)</li>
+                <li>• APK ลงนาม debug · ขนาด ~38 MB</li>
+                <li>• อัปเดตในตัวผ่าน GitHub Releases</li>
+              </ul>
+              <div className="mt-6 flex flex-wrap gap-2">
+                <a
+                  href={LATEST_APK}
+                  className="inline-flex items-center gap-2 rounded-full bg-[var(--sky)] px-5 py-2.5 text-sm font-semibold text-[var(--ink)] hover:bg-[var(--sky-soft)] transition"
+                >
+                  <Download className="h-4 w-4" /> ดาวน์โหลด APK
+                </a>
+                <a
+                  href={`${REPO}/releases`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold hover:bg-white/10 transition"
+                >
+                  Releases ทั้งหมด
+                </a>
+              </div>
+            </div>
+
+            {/* iOS card */}
+            <div className="relative overflow-hidden rounded-2xl border border-[var(--gold)]/30 bg-gradient-to-br from-[var(--gold)]/10 to-transparent p-6 sm:p-8">
+              <div className="flex items-start justify-between">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--gold)]/20 text-[var(--gold)]">
+                  <Apple className="h-6 w-6" />
+                </div>
+                <span className="rounded-full bg-[var(--gold)]/15 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--gold)]">
+                  Source · build เอง
+                </span>
+              </div>
+              <h3 className="display mt-5 text-2xl font-bold text-white">iOS (Companion)</h3>
+              <p className="mt-2 text-sm text-[var(--paper-2)] leading-relaxed">
+                iOS sandbox ไม่อนุญาตการ capture noti/หน้าจอข้ามแอปแบบ Android — แอป iOS จึงเป็นตัว
+                <span className="text-white font-semibold"> เปิดดู</span> archive ที่ export มาจาก Android
+                (JSON / CSV / JSONL) ค้นหา + อ่านออกเสียง + ล็อกด้วย Face ID
+              </p>
+              <ul className="mt-4 space-y-1.5 text-xs text-[var(--paper-2)]">
+                <li>• iOS 16 ขึ้นไป, SwiftUI</li>
+                <li>• ต้อง build ด้วย Xcode 15+ บน macOS</li>
+                <li>• ยังไม่มี TestFlight / App Store (sideload-only)</li>
+              </ul>
+              <div className="mt-6 flex flex-wrap gap-2">
+                <a
+                  href={IOS_SRC}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-full bg-[var(--gold)] px-5 py-2.5 text-sm font-semibold text-[var(--ink)] hover:bg-[#ffd887] transition"
+                >
+                  <Apple className="h-4 w-4" /> เปิดซอร์ส iOS
+                </a>
+                <a
+                  href={`${REPO}/blob/main/ios/NotiKeeperIOS/README.md`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold hover:bg-white/10 transition"
+                >
+                  วิธี build
+                </a>
+              </div>
             </div>
           </div>
         </div>

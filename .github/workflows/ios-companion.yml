@@ -1,0 +1,50 @@
+name: iOS Companion
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ios-companion.yml"
+      - "ios/**"
+      - "docs/PRD-NotiKeeper-iOS-Companion-v0.1.0b.md"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/ios-companion.yml"
+      - "ios/**"
+      - "docs/PRD-NotiKeeper-iOS-Companion-v0.1.0b.md"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build NotiKeeper iOS Companion
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    env:
+      PROJECT_PATH: ios/NotiKeeperIOS/NotiKeeperIOS.xcodeproj
+      SCHEME: NotiKeeperIOS
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: |
+          xcodebuild -version
+          xcode-select -p
+
+      - name: List available iOS simulators
+        run: xcrun simctl list devices available
+
+      - name: Build for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            CODE_SIGNING_ALLOWED=NO \
+            build
