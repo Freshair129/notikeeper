@@ -1,0 +1,14 @@
+{
+  "name": "notikeeper-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "MCP server that ingests NotiKeeper uploads and exposes them as searchable tools",
+  "bin": {
+    "notikeeper-mcp": "server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  }
+}

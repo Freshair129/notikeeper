@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NotiKeeper</string>
+    <string name="a11y_desc">อ่านข้อความที่แสดงบนหน้าจอ Messenger เพื่อบันทึกบทสนทนาไว้ค้นหาย้อนหลัง — ข้อมูลทั้งหมดเก็บในเครื่องเท่านั้น ไม่มีการส่งออกอินเทอร์เน็ต</string>
+</resources>
