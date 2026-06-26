@@ -146,7 +146,7 @@ const dict = {
       th: 'Android เป็นตัวหลักที่ทำ capture ได้เต็มที่ — iOS เป็น companion สำหรับเปิดดู / ค้นหา / อ่านออกเสียงไฟล์ archive ที่ export ออกมาจาก Android',
     },
     android: {
-      tag:   { en: 'available · v1.6',    th: 'พร้อมใช้งาน · v1.6' },
+      tag:   { en: 'available',           th: 'พร้อมใช้งาน' },
       title: { en: 'Android',              th: 'Android' },
       body: {
         en: 'Capture notifications across all apps + read Messenger / LINE / IG / WhatsApp / Telegram threads off the screen. Encrypted local DB + eyes-free read-aloud for riders.',
@@ -229,11 +229,25 @@ const dict = {
 function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [appVersion, setAppVersion] = useState<string>('latest');
   const [lang, setLang] = useState<Lang>(() => {
     if (typeof window === 'undefined') return 'en';
     const saved = window.localStorage.getItem('nk-lang') as Lang | null;
     return saved === 'th' || saved === 'en' ? saved : 'en';
   });
+
+  // Pull versionName from the same version.json the in-app updater uses,
+  // so the page always reflects the latest published release.
+  useEffect(() => {
+    const c = new AbortController();
+    fetch(VERSION_URL, { signal: c.signal, cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((v: { versionName?: string } | null) => {
+        if (v?.versionName) setAppVersion(v.versionName);
+      })
+      .catch(() => { /* offline / blocked — keep the fallback label */ });
+    return () => c.abort();
+  }, []);
 
   useEffect(() => {
     const onScroll = () => setScrolled(window.scrollY > 24);
@@ -422,7 +436,7 @@ function App() {
             <div className="rounded-[36px] border border-white/10 bg-[var(--ink-2)] p-6 shadow-2xl">
               <div className="flex items-center justify-between text-xs text-[var(--paper-2)]">
                 <span>NotiKeeper</span>
-                <span>1.6</span>
+                <span>{appVersion}</span>
               </div>
               <div className="mt-4 flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm text-[var(--paper-2)]">
                 <Search className="h-4 w-4 text-[var(--sky)]" />
@@ -536,7 +550,7 @@ function App() {
                   <Smartphone className="h-6 w-6" />
                 </div>
                 <span className="rounded-full bg-[var(--sky)]/15 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--sky)]">
-                  {t(dict.download.android.tag)}
+                  {t(dict.download.android.tag)} · v{appVersion}
                 </span>
               </div>
               <h3 className="display mt-5 text-2xl font-bold text-white">{t(dict.download.android.title)}</h3>
@@ -682,7 +696,7 @@ function App() {
             <div className="flex items-center gap-2">
               <img src="/favicon.svg" alt="" className="h-6 w-6" />
               <span className="display font-semibold">NotiKeeper</span>
-              <span className="text-xs text-[var(--muted)]">v1.6 · MIT</span>
+              <span className="text-xs text-[var(--muted)]">v{appVersion} · MIT</span>
             </div>
             <div className="flex items-center gap-5 text-sm text-[var(--paper-2)]">
               <a href={REPO} target="_blank" rel="noreferrer" className="hover:text-white transition">GitHub</a>
