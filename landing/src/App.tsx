@@ -21,6 +21,9 @@ const REPO = 'https://github.com/Freshair129/notikeeper';
 const LATEST_APK = `${REPO}/releases/latest/download/NotiKeeper.apk`;
 const VERSION_URL = `${REPO}/releases/latest/download/version.json`;
 const IOS_SRC = `${REPO}/tree/main/ios/NotiKeeperIOS`;
+const IOS_README = `${REPO}/blob/main/ios/NotiKeeperIOS/README.md`;
+const IOS_PRD = `${REPO}/blob/main/docs/PRD-NotiKeeper-iOS-Companion-v0.1.0b.md`;
+const IOS_ACTION = `${REPO}/actions/workflows/ios-companion.yml`;
 
 type Lang = 'en' | 'th';
 
@@ -169,6 +172,7 @@ const dict = {
       },
       btnSrc:   { en: 'Open iOS source', th: 'เปิดซอร์ส iOS' },
       btnBuild: { en: 'How to build',    th: 'วิธี build' },
+      btnCi:    { en: 'macOS CI',         th: 'CI macOS' },
     },
   },
 
@@ -205,6 +209,8 @@ const dict = {
       { label: 'README',       en: 'Usage + install',          th: 'วิธีใช้ + ติดตั้ง',         href: `${REPO}/blob/main/README.md` },
       { label: 'PRD',          en: 'Product Requirements',     th: 'Product Requirements',     href: `${REPO}/blob/main/docs/PRD-NotiKeeper-v1.0.md` },
       { label: 'BRD',          en: 'Business Requirements',    th: 'Business Requirements',    href: `${REPO}/blob/main/docs/BRD-NotiKeeper-v1.0.md` },
+      { label: 'iOS PRD',      en: 'Companion scope',          th: 'ขอบเขต iOS companion',     href: IOS_PRD },
+      { label: 'iOS README',   en: 'Build with Xcode',         th: 'วิธี build ด้วย Xcode',     href: IOS_README },
       { label: 'ARCHITECTURE', en: 'System overview',          th: 'โครงระบบ',                  href: `${REPO}/blob/main/ARCHITECTURE.md` },
       { label: 'SECURITY',     en: 'Threat model',             th: 'Threat model',             href: `${REPO}/blob/main/SECURITY.md` },
       { label: 'CHANGELOG',    en: 'Version history',          th: 'ประวัติเวอร์ชัน',           href: `${REPO}/blob/main/CHANGELOG.md` },
@@ -391,7 +397,9 @@ function App() {
               {t(dict.hero.ctaApk)}
             </a>
             <a
-              href="#download"
+              href={IOS_SRC}
+              target="_blank"
+              rel="noreferrer"
               className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-6 py-3.5 text-sm font-semibold hover:bg-white/10 transition"
             >
               <Apple className="h-4 w-4" />
@@ -579,12 +587,20 @@ function App() {
                   <Apple className="h-4 w-4" /> {t(dict.download.ios.btnSrc)}
                 </a>
                 <a
-                  href={`${REPO}/blob/main/ios/NotiKeeperIOS/README.md`}
+                  href={IOS_README}
                   target="_blank"
                   rel="noreferrer"
                   className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold hover:bg-white/10 transition"
                 >
                   {t(dict.download.ios.btnBuild)}
+                </a>
+                <a
+                  href={IOS_ACTION}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold hover:bg-white/10 transition"
+                >
+                  {t(dict.download.ios.btnCi)}
                 </a>
               </div>
             </div>
