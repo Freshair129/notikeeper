@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings as AndroidSettings
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
@@ -66,6 +67,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.example.notikeeper.data.NotiItem
 import com.example.notikeeper.data.NotiStore
 import com.example.notikeeper.data.Settings
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
+import org.json.JSONObject
+import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -300,6 +305,32 @@ fun BackupScreen(onClose: () -> Unit) {
     var apiToken by remember { mutableStateOf(Settings.getApiToken(ctx)) }
     var auto by remember { mutableStateOf(Settings.getAutoUpload(ctx)) }
     var status by remember { mutableStateOf("") }
+
+    // QR pairing — opens ZXing scanner; the QR payload from the PC dashboard is
+    // either plain URL or JSON {endpoint, token, updateUrl}.
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val raw = result.contents ?: return@rememberLauncherForActivityResult
+        var endpoint: String? = null
+        var token: String? = null
+        var update: String? = null
+        runCatching {
+            val o = JSONObject(raw)
+            endpoint = o.optString("endpoint").takeIf { it.isNotBlank() }
+            token = o.optString("token").takeIf { it.isNotBlank() }
+            update = o.optString("updateUrl").takeIf { it.isNotBlank() }
+        }
+        if (endpoint == null && raw.startsWith("http")) endpoint = raw.trim()
+        if (endpoint != null) {
+            apiUrl = endpoint!!
+            Settings.setApiUrl(ctx, endpoint!!)
+            if (token != null) { apiToken = token!!; Settings.setApiToken(ctx, token!!) }
+            if (update != null) { Settings.setUpdateUrl(ctx, update!!) }
+            status = "ตั้งค่าเสร็จ — endpoint: $endpoint"
+            Toast.makeText(ctx, "Pair สำเร็จ", Toast.LENGTH_SHORT).show()
+        } else {
+            status = "QR ไม่ถูกฟอร์แมต"
+        }
+    }
     var readNoti by remember { mutableStateOf(Settings.getReadAloudNoti(ctx)) }
     var readScreen by remember { mutableStateOf(Settings.getReadAloudScreen(ctx)) }
     var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
@@ -537,6 +568,17 @@ fun BackupScreen(onClose: () -> Unit) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    scanLauncher.launch(ScanOptions().apply {
+                        setOrientationLocked(false)
+                        setPrompt("จ่อกล้องไปที่ QR บนหน้าจอ PC (เปิด NotiKeeper Dashboard → Pair Mobile)")
+                        setBeepEnabled(true)
+                    })
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("📷 สแกน QR จาก PC dashboard") }
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = apiToken,

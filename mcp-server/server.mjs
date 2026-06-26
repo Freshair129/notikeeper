@@ -14,6 +14,7 @@
  */
 import http from "node:http";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -69,6 +70,22 @@ function ingest(arr) {
 
 load();
 console.error(`[notikeeper-mcp] loaded ${rows.length} rows from ${DATA_FILE}`);
+
+/** Return the first private-LAN IPv4 address (e.g. 192.168.x.x or 10.x), skipping
+ *  loopback, link-local, and the noisy 172.x ranges used by WSL/Hyper-V. */
+function getLanIp() {
+  const ifs = os.networkInterfaces();
+  for (const name of Object.keys(ifs)) {
+    for (const a of ifs[name] || []) {
+      if (a.family !== "IPv4" || a.internal) continue;
+      const ip = a.address;
+      if (ip.startsWith("169.254.")) continue;     // link-local
+      if (ip.startsWith("172.")) continue;          // WSL / Hyper-V
+      if (ip.startsWith("192.168.") || ip.startsWith("10.")) return ip;
+    }
+  }
+  return "127.0.0.1";
+}
 
 // ---------- helpers used by every layer ----------
 const byNewest = (a, b) => b.time - a.time;
@@ -172,7 +189,26 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // 4) Server-Sent Events stream — pushes live updates when /ingest fires
+  // 4) Pairing info for the QR code shown on the dashboard
+  if (req.method === "GET" && url.pathname === "/api/pair") {
+    const ip = getLanIp();
+    const endpoint = `http://${ip}:${PORT}/ingest`;
+    const updateUrl = "https://github.com/Freshair129/notikeeper/releases/latest/download/version.json";
+    const payload = {
+      type: "notikeeper-pair",
+      v: 1,
+      endpoint,
+      ip,
+      port: PORT,
+      token: TOKEN || "",
+      updateUrl,
+    };
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(payload));
+    return;
+  }
+
+  // 5) Server-Sent Events stream — pushes live updates when /ingest fires
   if (req.method === "GET" && url.pathname === "/events") {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",

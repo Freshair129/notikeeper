@@ -13,6 +13,16 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.11] — 2026-06-26
+### Added
+- **QR Pairing** between the PC dashboard and the phone: dashboard exposes
+  a "Pair Mobile" button that opens a modal with a QR code carrying the
+  server endpoint, token, and update URL (auto-detected LAN IP via
+  `os.networkInterfaces()`, skipping WSL/Hyper-V 172.x ranges). The Android
+  app has a matching "📷 สแกน QR จาก PC dashboard" button in the Backup
+  screen (uses `journeyapps:zxing-android-embedded`). Accepts plain URL or
+  JSON payloads; falls back gracefully when the QR is just a URL.
+
 ## [1.10] — 2026-06-26
 ### Added
 - Per-app **capture whitelist** (`Settings.shouldCapture`): the Backup screen

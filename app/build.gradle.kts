@@ -14,8 +14,8 @@ android {
         // app-lock combo without per-version workarounds.
         minSdk = 30
         targetSdk = 34
-        versionCode = 11
-        versionName = "1.10"
+        versionCode = 12
+        versionName = "1.11"
     }
 
     buildTypes {
@@ -55,4 +55,7 @@ dependencies {
 
     // App lock: fingerprint / device PIN
     implementation("androidx.biometric:biometric:1.1.0")
+
+    // QR scanner (camera-based pairing)
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 }
