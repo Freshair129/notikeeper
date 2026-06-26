@@ -304,7 +304,9 @@ fun BackupScreen(onClose: () -> Unit) {
     var readScreen by remember { mutableStateOf(Settings.getReadAloudScreen(ctx)) }
     var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
     var appFilter by remember { mutableStateOf("") }
+    var captureFilter by remember { mutableStateOf("") }
     var speakApps by remember { mutableStateOf(Settings.getSpeakApps(ctx)) }
+    var captureApps by remember { mutableStateOf(Settings.getCaptureApps(ctx)) }
     var updateUrl by remember { mutableStateOf(Settings.getUpdateUrl(ctx)) }
     var updateStatus by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
@@ -315,6 +317,10 @@ fun BackupScreen(onClose: () -> Unit) {
     val filteredApps = remember(apps, appFilter) {
         if (appFilter.isBlank()) apps
         else apps.filter { it.label.contains(appFilter, ignoreCase = true) || it.pkg.contains(appFilter, ignoreCase = true) }
+    }
+    val filteredCaptureApps = remember(apps, captureFilter) {
+        if (captureFilter.isBlank()) apps
+        else apps.filter { it.label.contains(captureFilter, ignoreCase = true) || it.pkg.contains(captureFilter, ignoreCase = true) }
     }
 
     Scaffold(
@@ -332,6 +338,46 @@ fun BackupScreen(onClose: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
+            // ───── Capture whitelist ─────
+            Text("เลือกแอปที่จะบันทึก", fontWeight = FontWeight.Bold)
+            Text(
+                "ไม่เลือกอะไรเลย = บันทึกทุกแอป (ค่าเริ่มต้น)  ·  ตอนนี้เลือกอยู่ ${captureApps.size} แอป",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = captureFilter,
+                onValueChange = { captureFilter = it },
+                label = { Text("ค้นหาแอป") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(4.dp))
+            if (apps.isEmpty()) {
+                Text("กำลังโหลดรายชื่อแอป...", style = MaterialTheme.typography.bodySmall)
+            } else {
+                filteredCaptureApps.forEach { entry ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Checkbox(
+                            checked = entry.pkg in captureApps,
+                            onCheckedChange = { checked ->
+                                captureApps = if (checked) captureApps + entry.pkg else captureApps - entry.pkg
+                                Settings.setCaptureApps(ctx, captureApps)
+                            }
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(entry.label)
+                    }
+                }
+                if (filteredCaptureApps.isEmpty()) {
+                    Text("ไม่พบแอปที่ตรง", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
             Text("อัปเดตแอป", fontWeight = FontWeight.Bold)
             Text(
                 "เวอร์ชันปัจจุบัน: ${BuildConfig.VERSION_NAME}",

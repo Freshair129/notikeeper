@@ -13,6 +13,14 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.10] — 2026-06-26
+### Added
+- Per-app **capture whitelist** (`Settings.shouldCapture`): the Backup screen
+  now has a "เลือกแอปที่จะบันทึก" section that scans every installed app and
+  lets the user pick which ones get archived. Empty selection = capture all
+  apps (previous behaviour). Applies to both `NotiLoggerService` (noti) and
+  `MessengerReaderService` (screen reads).
+
 ## [1.9] — 2026-06-26
 ### Added
 - In-app **Dashboard** screen (top app bar → "Dashboard"): four KPI tiles

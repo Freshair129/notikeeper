@@ -53,6 +53,16 @@ object Settings {
         return allow.isEmpty() || pkg in allow
     }
 
+    /** Packages allowed to be captured (notifications + screen). Empty set = all apps. */
+    fun getCaptureApps(c: Context): Set<String> = prefs(c).getStringSet("capture_apps", emptySet()) ?: emptySet()
+    fun setCaptureApps(c: Context, v: Set<String>) = prefs(c).edit().putStringSet("capture_apps", v).apply()
+
+    /** True if [pkg] should be captured: whitelist empty (all) or contains it. */
+    fun shouldCapture(c: Context, pkg: String): Boolean {
+        val allow = getCaptureApps(c)
+        return allow.isEmpty() || pkg in allow
+    }
+
     // In-app updater: URL of the version.json to check.
     // Defaults to NotiKeeper's GitHub Releases "latest/download" stable URL so a fresh
     // install can auto-check for updates without the user pasting anything.

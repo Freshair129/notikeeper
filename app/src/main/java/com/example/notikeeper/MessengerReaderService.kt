@@ -57,6 +57,7 @@ class MessengerReaderService : AccessibilityService() {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
         if (pkg !in targets) return
+        if (!com.example.notikeeper.data.Settings.shouldCapture(applicationContext, pkg)) return
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> Unit

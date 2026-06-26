@@ -41,12 +41,15 @@ class NotiLoggerService : NotificationListenerService() {
         // Skip persistent/ongoing notifications (music player, downloads, "running" icons).
         if (notification.flags and Notification.FLAG_ONGOING_EVENT != 0) return
 
+        val pkg = sbn.packageName
+        // Honour the user's per-app capture whitelist (empty = capture all).
+        if (!com.example.notikeeper.data.Settings.shouldCapture(applicationContext, pkg)) return
+
         val appName = runCatching {
             val pm = packageManager
-            pm.getApplicationLabel(pm.getApplicationInfo(sbn.packageName, 0)).toString()
-        }.getOrDefault(sbn.packageName)
+            pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+        }.getOrDefault(pkg)
 
-        val pkg = sbn.packageName
         val postTime = sbn.postTime
         scope.launch {
             NotiStore.get(applicationContext).insertNoti(pkg, appName, title, text, postTime)

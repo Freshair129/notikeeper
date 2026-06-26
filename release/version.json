@@ -1,6 +1,6 @@
 {
-  "versionCode": 10,
-  "versionName": "1.9",
+  "versionCode": 11,
+  "versionName": "1.10",
   "url": "https://github.com/Freshair129/notikeeper/releases/latest/download/NotiKeeper.apk",
-  "notes": "NotiKeeper 1.9 — เพิ่มหน้า Dashboard ในแอป: สรุป KPI 4 ตัว (รวม/แอป top/noti vs screen/ช่วงเวลา), กราฟ sparkline กิจกรรม 24 ชม., และ bar chart Top 8 แอป"
+  "notes": "NotiKeeper 1.10 — เพิ่มตัวกรองแอปสำหรับการบันทึก: หน้า 'สำรอง' มีรายการแอปทั้งหมดให้ติ๊กเลือกว่าจะบันทึกแอปไหน (ไม่ติ๊ก = ทุกแอป เหมือนเดิม) ใช้กับทั้ง noti และอ่านหน้าจอ"
 }
