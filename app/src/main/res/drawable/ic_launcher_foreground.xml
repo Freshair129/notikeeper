@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground: stylised "bell + keep" mark for NotiKeeper.
+  Canvas 108dp; safe zone is the inner 66dp (center 21..87).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soft glow halo behind the bell -->
+    <path
+        android:fillColor="#1B3A66"
+        android:pathData="M54,30 m-22,0 a22,22 0 1,0 44,0 a22,22 0 1,0 -44,0" />
+
+    <!-- Bell body -->
+    <path
+        android:fillColor="#5EC1FF"
+        android:pathData="M54,30
+                          C44,30 36,38 36,48
+                          L36,60
+                          L32,68
+                          L76,68
+                          L72,60
+                          L72,48
+                          C72,38 64,30 54,30 Z" />
+
+    <!-- Bell top knob -->
+    <path
+        android:fillColor="#5EC1FF"
+        android:pathData="M54,24 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+
+    <!-- Bell clapper / mouth -->
+    <path
+        android:fillColor="#5EC1FF"
+        android:pathData="M48,70 L60,70 C60,74 57,77 54,77 C51,77 48,74 48,70 Z" />
+
+    <!-- Lock body (sits under the bell — encrypted-storage cue) -->
+    <path
+        android:fillColor="#FFC857"
+        android:pathData="M42,80
+                          L66,80
+                          C68,80 70,82 70,84
+                          L70,92
+                          C70,94 68,96 66,96
+                          L42,96
+                          C40,96 38,94 38,92
+                          L38,84
+                          C38,82 40,80 42,80 Z" />
+
+    <!-- Lock shackle -->
+    <path
+        android:strokeColor="#FFC857"
+        android:strokeWidth="3"
+        android:fillColor="#00000000"
+        android:pathData="M45,80 L45,76 C45,71 49,68 54,68 C59,68 63,71 63,76 L63,80" />
+
+    <!-- Lock keyhole -->
+    <path
+        android:fillColor="#0F1B2D"
+        android:pathData="M54,86 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
+    <path
+        android:fillColor="#0F1B2D"
+        android:pathData="M53,87 L55,87 L55,92 L53,92 Z" />
+</vector>

@@ -287,12 +287,19 @@ fun BackupScreen(onClose: () -> Unit) {
     var status by remember { mutableStateOf("") }
     var readNoti by remember { mutableStateOf(Settings.getReadAloudNoti(ctx)) }
     var readScreen by remember { mutableStateOf(Settings.getReadAloudScreen(ctx)) }
-    var apps by remember { mutableStateOf(emptyList<Pair<String, String>>()) }
+    var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
+    var appFilter by remember { mutableStateOf("") }
     var speakApps by remember { mutableStateOf(Settings.getSpeakApps(ctx)) }
     var updateUrl by remember { mutableStateOf(Settings.getUpdateUrl(ctx)) }
     var updateStatus by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
-        apps = withContext(Dispatchers.IO) { NotiStore.get(ctx).distinctApps() }
+        apps = withContext(Dispatchers.IO) {
+            InstalledApps.scan(ctx, NotiStore.get(ctx).distinctApps())
+        }
+    }
+    val filteredApps = remember(apps, appFilter) {
+        if (appFilter.isBlank()) apps
+        else apps.filter { it.label.contains(appFilter, ignoreCase = true) || it.pkg.contains(appFilter, ignoreCase = true) }
     }
 
     Scaffold(
@@ -375,27 +382,39 @@ fun BackupScreen(onClose: () -> Unit) {
 
             Spacer(Modifier.height(8.dp))
             Text(
-                "เลือกแอปที่จะอ่าน (ไม่เลือก = อ่านทุกแอป)",
+                "เลือกแอปที่จะอ่าน (${speakApps.size} เลือก / ${apps.size} ทั้งหมด — ไม่เลือก = อ่านทุกแอป)",
                 style = MaterialTheme.typography.bodySmall
             )
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = appFilter,
+                onValueChange = { appFilter = it },
+                label = { Text("ค้นหาแอป (พิมพ์เพื่อกรอง)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(4.dp))
             if (apps.isEmpty()) {
-                Text(
-                    "ยังไม่มีข้อมูลแอป — รอการแจ้งเตือนเข้ามาสักครู่แล้วเปิดหน้านี้ใหม่",
-                    style = MaterialTheme.typography.bodySmall
-                )
+                Text("กำลังโหลดรายชื่อแอป...", style = MaterialTheme.typography.bodySmall)
             } else {
-                apps.forEach { (pkg, name) ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                filteredApps.forEach { entry ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Checkbox(
-                            checked = pkg in speakApps,
+                            checked = entry.pkg in speakApps,
                             onCheckedChange = { checked ->
-                                speakApps = if (checked) speakApps + pkg else speakApps - pkg
+                                speakApps = if (checked) speakApps + entry.pkg else speakApps - entry.pkg
                                 Settings.setSpeakApps(ctx, speakApps)
                             }
                         )
                         Spacer(Modifier.width(4.dp))
-                        Text(name)
+                        Text(entry.label)
                     }
+                }
+                if (filteredApps.isEmpty()) {
+                    Text("ไม่พบแอปที่ตรง", style = MaterialTheme.typography.bodySmall)
                 }
             }
 

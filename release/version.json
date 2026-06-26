@@ -1,6 +1,6 @@
 {
-  "versionCode": 6,
-  "versionName": "1.5",
+  "versionCode": 7,
+  "versionName": "1.6",
   "url": "https://github.com/Freshair129/notikeeper/releases/latest/download/NotiKeeper.apk",
-  "notes": "NotiKeeper 1.5 — เพิ่มระบบอัปเดตในแอป (in-app updater)"
+  "notes": "NotiKeeper 1.6 — ไอคอนแอปใหม่ (กระดิ่ง+ล็อก), หน้าเลือกแอปสำหรับอ่านออกเสียงสแกนแอปที่ติดตั้งทั้งหมดให้ติ๊กเลือก + กรองด้วยช่องค้นหา และเป็นรอบทดสอบระบบอัปเดต"
 }
