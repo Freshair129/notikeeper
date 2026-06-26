@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "1.6",
+  "versionCode": 8,
+  "versionName": "1.7",
   "url": "https://github.com/Freshair129/notikeeper/releases/latest/download/NotiKeeper.apk",
-  "notes": "NotiKeeper 1.6 — ไอคอนแอปใหม่ (กระดิ่ง+ล็อก), หน้าเลือกแอปสำหรับอ่านออกเสียงสแกนแอปที่ติดตั้งทั้งหมดให้ติ๊กเลือก + กรองด้วยช่องค้นหา และเป็นรอบทดสอบระบบอัปเดต"
+  "notes": "NotiKeeper 1.7 — แก้ปัญหา 'unable to parse TLS packet' เวลาอัปโหลดเข้า PC: เปิด cleartext HTTP traffic ใน manifest (Android 9+ block HTTP plain-text เป็นค่าตั้งต้น) — endpoint แบบ http://192.168.x.x:8765/ingest ใช้งานได้แล้ว"
 }

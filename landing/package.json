@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "vercel:build": "node ./scripts/vercel-cli.mjs build --yes"
   },
   "dependencies": {
     "lucide-react": "^1.21.0",

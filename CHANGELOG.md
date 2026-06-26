@@ -13,6 +13,16 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.7] — 2026-06-26
+### Fixed
+- Upload to a private LAN endpoint (e.g. `http://192.168.1.100:8765/ingest`)
+  failed with "unable to parse TLS packet" on the server side. Android 9+
+  blocks cleartext HTTP by default, which made `HttpURLConnection` either
+  upgrade the request or send TLS bytes against an HTTP listener. The
+  `<application>` element now sets `android:usesCleartextTraffic="true"`,
+  so plain HTTP works for private servers while HTTPS endpoints continue
+  to work as before.
+
 ## [1.6] — 2026-06-26
 ### Added
 - Adaptive launcher icon (vector bell + lock, navy / blue / gold).
