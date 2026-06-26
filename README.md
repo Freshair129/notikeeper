@@ -1,6 +1,7 @@
 # NotiKeeper
 
-> ดู [`CHANGELOG.md`](CHANGELOG.md) สำหรับประวัติเวอร์ชัน · [`ARCHITECTURE.md`](ARCHITECTURE.md) อธิบายโครงระบบ · [`SECURITY.md`](SECURITY.md) อธิบาย threat model + การเข้ารหัส · [`RELEASE.md`](RELEASE.md) วิธีปล่อยรุ่นใหม่ · [`CLAUDE.md`](CLAUDE.md) บริบทสำหรับ AI ที่เปิด repo นี้ · [`LICENSE`](LICENSE) MIT
+> **Product:** [`docs/PRD-NotiKeeper-v1.0.md`](docs/PRD-NotiKeeper-v1.0.md) · [`docs/BRD-NotiKeeper-v1.0.md`](docs/BRD-NotiKeeper-v1.0.md)
+> **Engineering:** [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`SECURITY.md`](SECURITY.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`RELEASE.md`](RELEASE.md) · [`CLAUDE.md`](CLAUDE.md) · [`LICENSE`](LICENSE)
 
 
 แอป Android ที่ **บันทึกข้อความ/การแจ้งเตือน** (เน้น Messenger) ลงฐานข้อมูลในเครื่องแบบถาวร
