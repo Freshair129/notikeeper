@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>NotiKeeper Dashboard</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sarabun:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -91,7 +90,7 @@
           เปิดแอป NotiKeeper บนมือถือ → หน้า "สำรอง" → กดปุ่ม <span class="font-semibold text-white">"📷 สแกน QR"</span> แล้วจ่อกล้องไปที่ QR ด้านล่าง
         </p>
         <div class="bg-white p-4 rounded-xl flex items-center justify-center">
-          <canvas id="pair-qr"></canvas>
+          <img id="pair-qr" alt="Pair QR" width="320" height="320" />
         </div>
         <div class="mt-4 text-xs space-y-1">
           <div class="flex items-center justify-between gap-2">
@@ -254,13 +253,9 @@ $("#pair").addEventListener('click', async () => {
   const info = await (await fetch('/api/pair')).json();
   $("#pair-endpoint").textContent = info.endpoint;
   $("#pair-ip").textContent = `${info.ip}:${info.port}`;
-  const payload = JSON.stringify({
-    type: 'notikeeper-pair', v: 1,
-    endpoint: info.endpoint, token: info.token || '',
-    updateUrl: info.updateUrl,
-  });
+  // Cache-bust so the IP shows correctly even if the user's adapter changed
+  $("#pair-qr").src = '/api/pair-qr?t=' + Date.now();
   pairModal.classList.remove('hidden');
-  QRCode.toCanvas($("#pair-qr"), payload, { width: 280, margin: 2, color: { dark: '#0F1B2D', light: '#ffffff' } });
 });
 $("#pair-close").addEventListener('click', () => pairModal.classList.add('hidden'));
 pairModal.addEventListener('click', (e) => { if (e.target === pairModal) pairModal.classList.add('hidden'); });

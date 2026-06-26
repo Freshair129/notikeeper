@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import QRCode from "qrcode";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
@@ -205,6 +206,33 @@ const httpServer = http.createServer((req, res) => {
     };
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(payload));
+    return;
+  }
+
+  // Pre-rendered QR code as PNG so the dashboard works without any CDN.
+  if (req.method === "GET" && url.pathname === "/api/pair-qr") {
+    const ip = getLanIp();
+    const endpoint = `http://${ip}:${PORT}/ingest`;
+    const updateUrl = "https://github.com/Freshair129/notikeeper/releases/latest/download/version.json";
+    const payload = JSON.stringify({
+      type: "notikeeper-pair", v: 1,
+      endpoint, token: TOKEN || "", updateUrl,
+    });
+    QRCode.toBuffer(payload, {
+      width: 320, margin: 2,
+      color: { dark: "#0F1B2D", light: "#FFFFFF" },
+      errorCorrectionLevel: "M",
+    }).then((png) => {
+      res.writeHead(200, {
+        "Content-Type": "image/png",
+        "Cache-Control": "no-store",
+        "Content-Length": png.length,
+      });
+      res.end(png);
+    }).catch((e) => {
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("qr error: " + e.message);
+    });
     return;
   }
 
