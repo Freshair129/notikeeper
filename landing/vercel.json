@@ -1,6 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "// note": "Project Root Directory must be set to 'landing' in Vercel project settings since this lives in a subfolder.",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": "vite",
