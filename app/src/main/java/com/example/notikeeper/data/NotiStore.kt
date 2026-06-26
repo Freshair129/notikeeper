@@ -171,6 +171,62 @@ class NotiStore private constructor(
         return result
     }
 
+    /** Aggregate snapshot for the in-app dashboard. */
+    data class Stats(
+        val total: Long,
+        val notiCount: Long,
+        val screenCount: Long,
+        val minTime: Long,
+        val maxTime: Long,
+        val topApps: List<Pair<String, Long>>,  // appName -> count, sorted desc, up to 8
+        val hourlyLast24h: LongArray             // 24 buckets, oldest -> newest
+    )
+
+    fun getStats(): Stats {
+        val db = database
+        var total = 0L; var noti = 0L; var screen = 0L
+        var minT = Long.MAX_VALUE; var maxT = Long.MIN_VALUE
+        db.rawQuery(
+            "SELECT COUNT(*), " +
+                "SUM(CASE WHEN source='noti'   THEN 1 ELSE 0 END), " +
+                "SUM(CASE WHEN source='screen' THEN 1 ELSE 0 END), " +
+                "MIN(postTime), MAX(postTime) FROM notifications",
+            null
+        ).use {
+            if (it.moveToNext()) {
+                total  = it.getLong(0)
+                noti   = it.getLong(1)
+                screen = it.getLong(2)
+                if (!it.isNull(3)) minT = it.getLong(3)
+                if (!it.isNull(4)) maxT = it.getLong(4)
+            }
+        }
+
+        val apps = ArrayList<Pair<String, Long>>()
+        db.rawQuery(
+            "SELECT appName, COUNT(*) c FROM notifications GROUP BY appName ORDER BY c DESC LIMIT 8",
+            null
+        ).use {
+            while (it.moveToNext()) apps.add(it.getString(0) to it.getLong(1))
+        }
+
+        // Activity in the last 24h, bucketed by hour, oldest -> newest.
+        val now = System.currentTimeMillis()
+        val cutoff = now - 24L * 3600_000L
+        val buckets = LongArray(24)
+        db.rawQuery(
+            "SELECT postTime FROM notifications WHERE postTime >= ?",
+            arrayOf(cutoff.toString())
+        ).use {
+            while (it.moveToNext()) {
+                val t = it.getLong(0)
+                val idx = (((t - cutoff) / 3600_000L).toInt()).coerceIn(0, 23)
+                buckets[idx]++
+            }
+        }
+        return Stats(total, noti, screen, minT, maxT, apps, buckets)
+    }
+
     /** Distinct (package, appName) seen so far — for the read-aloud app picker. */
     fun distinctApps(): List<Pair<String, String>> {
         val cursor = database.rawQuery(

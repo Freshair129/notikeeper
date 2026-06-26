@@ -13,6 +13,13 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.9] — 2026-06-26
+### Added
+- In-app **Dashboard** screen (top app bar → "Dashboard"): four KPI tiles
+  (total messages, top app, noti/screen split, time range), a 24-hour
+  activity sparkline (Compose Canvas), and a Top-8 apps bar chart. Reads
+  aggregates straight from the encrypted DB via `NotiStore.getStats()`.
+
 ## [1.8] — 2026-06-26
 ### Changed
 - The update URL field is now prefilled with NotiKeeper's GitHub Releases
