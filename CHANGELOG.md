@@ -13,6 +13,13 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.8] — 2026-06-26
+### Changed
+- The update URL field is now prefilled with NotiKeeper's GitHub Releases
+  `latest/download/version.json` endpoint by default. A fresh install can
+  check for updates and self-update without any manual configuration; users
+  can still overwrite the field to point at a private mirror.
+
 ## [1.7] — 2026-06-26
 ### Fixed
 - Upload to a private LAN endpoint (e.g. `http://192.168.1.100:8765/ingest`)

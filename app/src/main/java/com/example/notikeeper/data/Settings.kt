@@ -53,7 +53,12 @@ object Settings {
         return allow.isEmpty() || pkg in allow
     }
 
-    // In-app updater: URL of the version.json to check
-    fun getUpdateUrl(c: Context): String = prefs(c).getString("update_url", "") ?: ""
+    // In-app updater: URL of the version.json to check.
+    // Defaults to NotiKeeper's GitHub Releases "latest/download" stable URL so a fresh
+    // install can auto-check for updates without the user pasting anything.
+    const val DEFAULT_UPDATE_URL =
+        "https://github.com/Freshair129/notikeeper/releases/latest/download/version.json"
+    fun getUpdateUrl(c: Context): String =
+        prefs(c).getString("update_url", DEFAULT_UPDATE_URL) ?: DEFAULT_UPDATE_URL
     fun setUpdateUrl(c: Context, v: String) = prefs(c).edit().putString("update_url", v).apply()
 }
