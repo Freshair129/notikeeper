@@ -12,6 +12,10 @@ This app does not capture other apps' notifications or screen content on iOS. iO
 2. Select the `NotiKeeperIOS` scheme.
 3. Run on an iOS 16+ simulator or device.
 
+## Ad Hoc distribution
+
+For signed `.ipa` export and registered-device distribution, see [AD_HOC_DISTRIBUTION.md](AD_HOC_DISTRIBUTION.md).
+
 ## Import formats
 
 - Android JSON export: array of objects with `id, source, app, pkg, title, text, side, time`
