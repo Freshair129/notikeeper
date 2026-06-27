@@ -351,11 +351,21 @@ const httpServer = http.createServer((req, res) => {
                                 WHERE t.id IN (${threadIds.map(() => "?").join(",") || "NULL"})`)
                       .all(...threadIds).map((r) => r.name);
 
-      const partsQ = RDB.prepare(`SELECT p.thread_id, u.id AS user_id, u.name, u.message_count
-                                  FROM participants p JOIN users u ON u.id=p.user_id
-                                  WHERE p.thread_id IN (${threadIds.map(() => "?").join(",") || "NULL"})
-                                  ORDER BY u.message_count DESC LIMIT 200`);
+      // Per-(thread,user) message counts — drives edge thickness for PARTICIPATES.
+      const partsQ = RDB.prepare(`
+        SELECT m.thread_id, m.sender_id AS user_id, u.name, u.message_count AS total_msgs,
+               COUNT(*) AS msgs_here
+        FROM messages m JOIN users u ON u.id = m.sender_id
+        WHERE m.thread_id IN (${threadIds.map(() => "?").join(",") || "NULL"})
+          AND m.sender_id IS NOT NULL
+        GROUP BY m.thread_id, m.sender_id
+        ORDER BY msgs_here DESC LIMIT 200`);
       const parts = threadIds.length ? partsQ.all(...threadIds) : [];
+
+      // Edge width: 1 (rare) → ~6 (very frequent). log10 keeps long tail readable.
+      const edgeWidth = (n) => Math.max(1, Math.min(6, 1 + Math.log10(n + 1) * 1.8));
+      // Mid-line label only when the edge is meaningful (skip "1" — too noisy).
+      const edgeLabel = (n) => n >= 3 ? String(n) : undefined;
 
       const nodes = [];
       const edges = [];
@@ -378,15 +388,27 @@ const httpServer = http.createServer((req, res) => {
         const tid = `thread:${t.id}`;
         const lbl = t.name.length > 28 ? t.name.slice(0, 28) + "…" : t.name;
         addNode(tid, lbl, "Thread", { app: t.app, msgs: t.message_count });
-        edges.push({ from: tid, to: `app:${t.app}`, label: "IN_APP", arrows: "to", color: { color: "#5EC1FF44" } });
+        const w = edgeWidth(t.message_count);
+        edges.push({
+          from: tid, to: `app:${t.app}`, arrows: "to",
+          width: w, label: edgeLabel(t.message_count),
+          color: { color: "#5EC1FF66", highlight: "#5EC1FF" },
+          title: `IN_APP · ${t.message_count} msgs in thread`,
+        });
       }
       const userSet = new Set();
       for (const p of parts) {
         const uid = `user:${p.user_id}`;
         userSet.add(uid);
         const lbl = p.name.length > 22 ? p.name.slice(0, 22) + "…" : p.name;
-        addNode(uid, lbl, "User", { msgs: p.message_count });
-        edges.push({ from: uid, to: `thread:${p.thread_id}`, label: "PARTICIPATES", arrows: "to", color: { color: "#9AE6B444" } });
+        addNode(uid, lbl, "User", { totalMsgs: p.total_msgs });
+        const w = edgeWidth(p.msgs_here);
+        edges.push({
+          from: uid, to: `thread:${p.thread_id}`, arrows: "to",
+          width: w, label: edgeLabel(p.msgs_here),
+          color: { color: "#9AE6B466", highlight: "#9AE6B4" },
+          title: `PARTICIPATES · ${p.msgs_here} msgs from ${p.name} in this thread`,
+        });
       }
 
       if (includeMsgs && threadIds.length === 1) {
