@@ -465,5 +465,131 @@ mcp.tool("stats", {}, async () => {
   return { content: [{ type: "text", text }] };
 });
 
+// ===== Semantic / graph tools (Phase B: BGE-M3 1024d + GenesisBlock) =====
+
+/** Format a hybridSearch / neighbors hit for Claude — readable text line. */
+function fmtHit(hit) {
+  const n = hit.node || hit;
+  const p = n.props || {};
+  const time = p.time ? new Date(p.time).toLocaleString() : "";
+  const where = p.thread_id ? `t:${p.thread_id}` : "";
+  const tag = (n.labels || []).find((l) => l === "Notification" || l === "ScreenLine") || "";
+  const score = hit.score != null ? ` (score=${hit.score.toFixed(3)})` : "";
+  return `[${time}] ${n.id} ${tag} ${where}${score}: ${p.text ?? p.name ?? ""}`.trim();
+}
+
+mcp.tool(
+  "semantic_search",
+  {
+    query: z.string().describe("Free-text query (Thai or English). Looks up the closest messages by vector cosine."),
+    k: z.number().optional().describe("How many hits to return (default 10)"),
+  },
+  async ({ query, k = 10 }) => {
+    try {
+      const hits = await searchSemantic(query, { k });
+      const text = hits.length
+        ? `top ${hits.length} semantic matches for "${query}":\n` + hits.map(fmtHit).join("\n")
+        : `no matches for "${query}"`;
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "find_similar",
+  {
+    text: z.string().describe("Text to find semantically similar messages to."),
+    k: z.number().optional().describe("How many neighbours (default 8)"),
+  },
+  async ({ text, k = 8 }) => {
+    try {
+      const hits = await searchSemantic(text, { k: k + 1 });   // +1 to skip the seed if present
+      const trimmed = hits.slice(0, k);
+      const out = trimmed.length
+        ? trimmed.map(fmtHit).join("\n")
+        : "no matches";
+      return { content: [{ type: "text", text: out }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "graph_neighbors",
+  {
+    seed: z.string().describe("Node id, e.g. 'thread:42', 'user:7', 'msg:1234', 'app:Messenger'."),
+    depth: z.number().optional().describe("How many hops out (default 1)"),
+    rel: z.string().optional().describe("Filter by relation: IN_APP, IN_THREAD, SENT_BY, PARTICIPATES"),
+    limit: z.number().optional().describe("Max nodes to return (default 25)"),
+  },
+  async ({ seed, depth = 1, rel, limit = 25 }) => {
+    try {
+      const out = await graphNeighbors(seed, { depth, rel, limit });
+      const text = out.length
+        ? `${out.length} neighbours of ${seed} (depth=${depth}${rel ? ", rel="+rel : ""}):\n` +
+          out.map(fmtHit).join("\n")
+        : `no neighbours for ${seed}`;
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "hql",
+  {
+    query: z.string().describe(
+      "Raw HQL string. Examples:\n" +
+      '  TRAVERSE FROM "thread:1" DEPTH 1 REL IN_APP\n' +
+      '  TRAVERSE FROM "user:5" DEPTH 1 REL PARTICIPATES\n' +
+      '  CONTEXT FOR "msg:42" TIER H1 BUDGET 200'
+    ),
+  },
+  async ({ query }) => {
+    try {
+      const r = await graphHql(query);
+      const text = Array.isArray(r)
+        ? `${r.length} result(s):\n` + r.slice(0, 25).map((row, i) =>
+            `#${i+1} ${JSON.stringify(row).slice(0, 300)}`).join("\n")
+        : JSON.stringify(r, null, 2).slice(0, 4000);
+      return { content: [{ type: "text", text }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "thread_summary",
+  {
+    threadName: z.string().optional().describe("Conversation name (partial match)"),
+    threadId: z.number().optional().describe("SQLite thread id"),
+    limit: z.number().optional().describe("Messages to include (default 30)"),
+  },
+  async ({ threadName, threadId, limit = 30 }) => {
+    let id = threadId;
+    if (!id && threadName) {
+      const row = RDB.prepare(
+        "SELECT id FROM threads WHERE name LIKE ? ORDER BY message_count DESC LIMIT 1"
+      ).get(`%${threadName}%`);
+      if (row) id = row.id;
+    }
+    if (!id) return { content: [{ type: "text", text: "no matching thread" }] };
+    const t = getThread(RDB, id, { limit });
+    if (!t) return { content: [{ type: "text", text: "thread not found" }] };
+    const head = `Thread #${t.id} [${t.app}] "${t.name}" — ${t.message_count} msgs, participants: ${t.participants.map(p => p.name).join(", ")}`;
+    const lines = t.messages.map((m) => {
+      const time = new Date(m.time).toLocaleString();
+      const who = m.side === "me" ? "me" : (m.sender || "?");
+      return `[${time}] ${who}: ${m.text}`;
+    });
+    return { content: [{ type: "text", text: head + "\n" + lines.join("\n") }] };
+  }
+);
+
 await mcp.connect(new StdioServerTransport());
 console.error("[notikeeper-mcp] MCP server ready (stdio)");
