@@ -11,6 +11,9 @@ captures/
 # Node (MCP server)
 mcp-server/node_modules/
 mcp-server/data.jsonl
+mcp-server/relations.db
+mcp-server/relations.db-shm
+mcp-server/relations.db-wal
 
 # Landing page (Vite)
 landing/node_modules/
