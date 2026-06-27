@@ -314,6 +314,105 @@ const httpServer = http.createServer((req, res) => {
     );
     return;
   }
+  // Subset of the graph shaped for vis-network: {nodes, edges}
+  if (req.method === "GET" && url.pathname === "/api/graph/view") {
+    try {
+      const focus = url.searchParams.get("focus");
+      const onlyApp = url.searchParams.get("app");
+      const includeMsgs = url.searchParams.get("messages") === "1";
+      const NODE_STYLE = {
+        App:     { color: "#5EC1FF", size: 26, shape: "dot",     fontColor: "#0F1B2D" },
+        Thread:  { color: "#FFC857", size: 18, shape: "diamond", fontColor: "#0F1B2D" },
+        User:    { color: "#9AE6B4", size: 14, shape: "dot",     fontColor: "#0F1B2D" },
+        Message: { color: "#C8D5E5", size:  6, shape: "dot",     fontColor: "#E6EEF8" },
+      };
+      const baseFor = (l) => NODE_STYLE[l] || { color: "#888", size: 8, shape: "dot", fontColor: "#fff" };
+
+      let threadIds;
+      if (focus && focus.startsWith("thread:")) {
+        threadIds = [parseInt(focus.split(":")[1], 10)];
+      } else if (onlyApp) {
+        threadIds = RDB.prepare(
+          "SELECT t.id FROM threads t JOIN apps a ON a.id=t.app_id WHERE a.name=? ORDER BY t.message_count DESC LIMIT 40"
+        ).all(onlyApp).map((r) => r.id);
+      } else {
+        // Overview: every app + top 40 threads (by message count)
+        threadIds = RDB.prepare(
+          "SELECT id FROM threads ORDER BY message_count DESC LIMIT 40"
+        ).all().map((r) => r.id);
+      }
+
+      const threadsQ = RDB.prepare(`SELECT t.id, t.name, t.is_group, t.message_count, a.name AS app
+                                    FROM threads t JOIN apps a ON a.id=t.app_id
+                                    WHERE t.id IN (${threadIds.map(() => "?").join(",") || "NULL"})`);
+      const threads = threadIds.length ? threadsQ.all(...threadIds) : [];
+
+      const apps = RDB.prepare(`SELECT DISTINCT a.name FROM apps a JOIN threads t ON t.app_id=a.id
+                                WHERE t.id IN (${threadIds.map(() => "?").join(",") || "NULL"})`)
+                      .all(...threadIds).map((r) => r.name);
+
+      const partsQ = RDB.prepare(`SELECT p.thread_id, u.id AS user_id, u.name, u.message_count
+                                  FROM participants p JOIN users u ON u.id=p.user_id
+                                  WHERE p.thread_id IN (${threadIds.map(() => "?").join(",") || "NULL"})
+                                  ORDER BY u.message_count DESC LIMIT 200`);
+      const parts = threadIds.length ? partsQ.all(...threadIds) : [];
+
+      const nodes = [];
+      const edges = [];
+      const seen = new Set();
+      const addNode = (id, label, type, props = {}) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        const s = baseFor(type);
+        nodes.push({
+          id, label, group: type,
+          shape: s.shape, size: s.size,
+          color: { background: s.color, border: s.color, highlight: { background: "#fff", border: s.color } },
+          font: { color: s.fontColor, size: 12 },
+          title: JSON.stringify(props, null, 2),
+        });
+      };
+
+      for (const a of apps) addNode(`app:${a}`, a, "App");
+      for (const t of threads) {
+        const tid = `thread:${t.id}`;
+        const lbl = t.name.length > 28 ? t.name.slice(0, 28) + "…" : t.name;
+        addNode(tid, lbl, "Thread", { app: t.app, msgs: t.message_count });
+        edges.push({ from: tid, to: `app:${t.app}`, label: "IN_APP", arrows: "to", color: { color: "#5EC1FF44" } });
+      }
+      const userSet = new Set();
+      for (const p of parts) {
+        const uid = `user:${p.user_id}`;
+        userSet.add(uid);
+        const lbl = p.name.length > 22 ? p.name.slice(0, 22) + "…" : p.name;
+        addNode(uid, lbl, "User", { msgs: p.message_count });
+        edges.push({ from: uid, to: `thread:${p.thread_id}`, label: "PARTICIPATES", arrows: "to", color: { color: "#9AE6B444" } });
+      }
+
+      if (includeMsgs && threadIds.length === 1) {
+        const msgs = RDB.prepare(`SELECT m.id, m.text, m.time, m.side, u.id AS uid, u.name AS uname
+                                  FROM messages m LEFT JOIN users u ON u.id=m.sender_id
+                                  WHERE m.thread_id = ? ORDER BY m.time DESC LIMIT 50`).all(threadIds[0]);
+        for (const m of msgs) {
+          const mid = `msg:${m.id}`;
+          const txt = (m.text || "").slice(0, 60);
+          addNode(mid, txt, "Message", { full: m.text, time: m.time });
+          edges.push({ from: mid, to: `thread:${threadIds[0]}`, arrows: "to",
+                       color: { color: "#C8D5E544" }, dashes: true });
+          if (m.uid) edges.push({ from: mid, to: `user:${m.uid}`, label: "SENT_BY", arrows: "to",
+                                  color: { color: "#FFC85744" } });
+        }
+      }
+
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ nodes, edges, counts: { nodes: nodes.length, edges: edges.length } }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(e) }));
+    }
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/graph/embed-all") {
     embedMessages(RDB, {
       onProgress: ({ done, failed, total }) => {
