@@ -14,6 +14,10 @@ mcp-server/data.jsonl
 mcp-server/relations.db
 mcp-server/relations.db-shm
 mcp-server/relations.db-wal
+mcp-server/graph.db/
+mcp-server/graph.db
+mcp-server/graph.db-shm
+mcp-server/graph.db-wal
 
 # Landing page (Vite)
 landing/node_modules/
