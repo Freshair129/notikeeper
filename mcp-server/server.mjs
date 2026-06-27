@@ -22,6 +22,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import QRCode from "qrcode";
 import { openDb, reindex, listThreads, getThread, listUsers, statsSummary } from "./relations.mjs";
+import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
+         executeHql as graphHql, statusSync as graphStatus } from "./graph-index.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
@@ -281,6 +283,46 @@ const httpServer = http.createServer((req, res) => {
     const r = rebuildRelations();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(r));
+    return;
+  }
+
+  // Graph (GenesisBlock) — vector+graph layer over the SQLite relations
+  if (req.method === "POST" && url.pathname === "/api/graph/rebuild") {
+    rebuildGraph(RDB).then(
+      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(r)); },
+      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+    );
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/graph/status") {
+    graphStatus().then(
+      (s) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(s)); },
+      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+    );
+    return;
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/graph/neighbors/")) {
+    const seed = decodeURIComponent(url.pathname.replace("/api/graph/neighbors/", ""));
+    graphNeighbors(seed, {
+      depth: parseInt(url.searchParams.get("depth") || "1", 10),
+      rel: url.searchParams.get("rel") || undefined,
+      limit: parseInt(url.searchParams.get("limit") || "50", 10),
+    }).then(
+      (out) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ seed, count: out.length, neighbors: out })); },
+      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+    );
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/graph/hql") {
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      const q = (() => { try { return JSON.parse(body).query; } catch { return body; } })();
+      graphHql(q).then(
+        (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ query: q, result: r })); },
+        (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+      );
+    });
     return;
   }
 
