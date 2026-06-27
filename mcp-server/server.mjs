@@ -21,6 +21,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import QRCode from "qrcode";
+import { openDb, reindex, listThreads, getThread, listUsers, statsSummary } from "./relations.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
@@ -64,6 +65,8 @@ function ingest(arr) {
   }
   if (fresh.length) {
     fs.appendFileSync(DATA_FILE, fresh.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    // incrementally fold the new rows into the relational DB
+    try { reindex(RDB, fresh); } catch (e) { console.error("[relations] fold failed:", e.message); }
     broadcast("new", { count: fresh.length, total: rows.length, sample: fresh.slice(-3) });
   }
   return fresh.length;
@@ -71,6 +74,15 @@ function ingest(arr) {
 
 load();
 console.error(`[notikeeper-mcp] loaded ${rows.length} rows from ${DATA_FILE}`);
+
+// Relational DB — derived view over data.jsonl
+const RDB = openDb(path.join(__dirname, "relations.db"));
+function rebuildRelations() {
+  const result = reindex(RDB, rows);
+  console.error(`[notikeeper-mcp] relations: +${result.inserted} (${result.threads} threads, ${result.users} users)`);
+  return result;
+}
+rebuildRelations();
 
 /** Return the first private-LAN IPv4 address (e.g. 192.168.x.x or 10.x), skipping
  *  loopback, link-local, and the noisy 172.x ranges used by WSL/Hyper-V. */
@@ -88,10 +100,50 @@ function getLanIp() {
   return "127.0.0.1";
 }
 
+// ---------- noise rules (configurable via NOTIKEEPER_NOISE_OFF=1 to disable) ----------
+const NOISE_APPS = new Set([
+  "Meta App Manager", "Galaxy Store", "Samsung capture", "Samsung Internet",
+  "Dashboard Test", "HealthCheck", "Android System", "Samsung DeX",
+]);
+
+const NOISE_PKG_PREFIX = ["com.samsung.android.app.", "com.android.systemui", "com.google.android.gms"];
+
+// Apps the user marked as promotional/marketing (default heuristic; tweak per taste)
+const PROMO_APPS = new Set(["7-Eleven", "Galaxy Store", "Grab"]);
+
+const GENERIC_TITLES = [
+  "การแจ้งเตือน", "Notification", "New notification", "New message", "Messages",
+];
+
+// Promo language patterns (Thai + English)
+const PROMO_RE = /(โปรโม|พิเศษ ?\d|ราคาพิเศษ|sale|discount|ลด ?\d|ฟรี ?ดูค|click here|จองเลย|ส่งฟรี|coupon|รับเลย|กดรับ)/i;
+
+// URL/sticker spam (e.g., line stickers)
+const URL_ONLY_RE = /^https?:\/\/\S+\s*$/;
+
+function classifyNoise(r) {
+  const app = (r.app || "").trim();
+  const pkg = (r.pkg || "").trim();
+  const title = (r.title || "").trim();
+  const text = (r.text || "").trim();
+
+  if (NOISE_APPS.has(app)) return "system-app";
+  if (NOISE_PKG_PREFIX.some((p) => pkg.startsWith(p))) return "system-pkg";
+  if (!text && !title) return "empty";
+  if (!text && title.length < 4) return "empty-text";
+  if (GENERIC_TITLES.includes(title) && text.length < 12) return "generic-title";
+  if (URL_ONLY_RE.test(text)) return "sticker-url";
+  if (PROMO_RE.test(text) || PROMO_RE.test(title)) return "promo";
+  if (PROMO_APPS.has(app) && r.source === "noti") return "promo-app";
+  return null; // not noise
+}
+
+const isNoise = (r) => classifyNoise(r) !== null;
+
 // ---------- helpers used by every layer ----------
 const byNewest = (a, b) => b.time - a.time;
 
-function filterRows({ query, app, source, sinceMs }) {
+function filterRows({ query, app, source, sinceMs, denoise = false }) {
   const q = (query || "").toLowerCase();
   const a = (app || "").toLowerCase();
   return rows.filter((r) => {
@@ -101,6 +153,7 @@ function filterRows({ query, app, source, sinceMs }) {
     if (q && !((r.text || "").toLowerCase().includes(q) ||
                (r.title || "").toLowerCase().includes(q) ||
                (r.app || "").toLowerCase().includes(q))) return false;
+    if (denoise && isNoise(r)) return false;
     return true;
   });
 }
@@ -164,6 +217,7 @@ const httpServer = http.createServer((req, res) => {
       app:    url.searchParams.get("app") || "",
       source: url.searchParams.get("source") || "",
       sinceMs: parseInt(url.searchParams.get("since") || "0", 10) || 0,
+      denoise: url.searchParams.get("denoise") === "1",
     }).sort(byNewest).slice(0, limit);
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ total: filtered.length, all: rows.length, rows: filtered }));
@@ -171,17 +225,22 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/api/stats") {
-    const byApp = {}, bySource = {};
-    let min = Infinity, max = -Infinity;
+    const byApp = {}, bySource = {}, byNoise = {};
+    let min = Infinity, max = -Infinity, noiseCount = 0;
     for (const r of rows) {
       byApp[r.app] = (byApp[r.app] || 0) + 1;
       bySource[r.source] = (bySource[r.source] || 0) + 1;
       if (r.time < min) min = r.time;
       if (r.time > max) max = r.time;
+      const tag = classifyNoise(r);
+      if (tag) { noiseCount++; byNoise[tag] = (byNoise[tag] || 0) + 1; }
     }
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({
       total: rows.length,
+      noiseCount,
+      cleanCount: rows.length - noiseCount,
+      byNoise,
       byApp: Object.fromEntries(Object.entries(byApp).sort((a, b) => b[1] - a[1])),
       bySource,
       minTime: rows.length ? min : null,
@@ -190,7 +249,42 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // 4) Pairing info for the QR code shown on the dashboard
+  // 4) Relational queries (Messenger-style: threads, users, messages)
+  if (req.method === "GET" && url.pathname === "/api/threads") {
+    const out = listThreads(RDB, {
+      app: url.searchParams.get("app") || null,
+      limit: Math.min(parseInt(url.searchParams.get("limit") || "200", 10), 2000),
+    });
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ count: out.length, threads: out }));
+    return;
+  }
+  if (req.method === "GET" && url.pathname.startsWith("/api/threads/")) {
+    const id = parseInt(url.pathname.split("/").pop(), 10);
+    const t = getThread(RDB, id, { limit: parseInt(url.searchParams.get("limit") || "500", 10) });
+    res.writeHead(t ? 200 : 404, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(t || { error: "not found" }));
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/users") {
+    const out = listUsers(RDB, { limit: parseInt(url.searchParams.get("limit") || "200", 10) });
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ count: out.length, users: out }));
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/relations") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(statsSummary(RDB)));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/relations/rebuild") {
+    const r = rebuildRelations();
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(r));
+    return;
+  }
+
+  // 5) Pairing info for the QR code shown on the dashboard
   if (req.method === "GET" && url.pathname === "/api/pair") {
     const ip = getLanIp();
     const endpoint = `http://${ip}:${PORT}/ingest`;
