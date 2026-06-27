@@ -23,7 +23,8 @@ import { z } from "zod";
 import QRCode from "qrcode";
 import { openDb, reindex, listThreads, getThread, listUsers, statsSummary } from "./relations.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
-         executeHql as graphHql, statusSync as graphStatus } from "./graph-index.mjs";
+         executeHql as graphHql, statusSync as graphStatus,
+         embedMessages, searchSemantic } from "./graph-index.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
@@ -309,6 +310,30 @@ const httpServer = http.createServer((req, res) => {
       limit: parseInt(url.searchParams.get("limit") || "50", 10),
     }).then(
       (out) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ seed, count: out.length, neighbors: out })); },
+      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+    );
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/graph/embed-all") {
+    embedMessages(RDB, {
+      onProgress: ({ done, failed, total }) => {
+        if (done % 50 === 0) console.error(`[embed] ${done}/${total} (${failed} failed)`);
+      },
+    }).then(
+      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(r)); },
+      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+    );
+    return;
+  }
+  if (req.method === "GET" && url.pathname === "/api/graph/search") {
+    const q = url.searchParams.get("q") || "";
+    const k = parseInt(url.searchParams.get("k") || "20", 10);
+    if (!q.trim()) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "q is required" })); return;
+    }
+    searchSemantic(q, { k }).then(
+      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ q, count: r.length, hits: r })); },
       (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
     );
     return;

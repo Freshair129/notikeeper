@@ -51,6 +51,35 @@ const threadId = (id)   => `thread:${id}`;
 const userId   = (id)   => `user:${id}`;
 const msgId    = (id)   => `msg:${id}`;
 
+// BGE-M3 dimensions — multilingual, strong on Thai. Served by Ollama.
+const EMBED_MODEL = "bge-m3";
+const EMBED_DIM = 1024;
+const COLLECTION = "messages";
+const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
+
+/** Get one embedding from Ollama. Returns a Float32Array of length EMBED_DIM. */
+export async function embed(text) {
+  const r = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: EMBED_MODEL, prompt: text }),
+  });
+  if (!r.ok) throw new Error(`ollama ${r.status}: ${await r.text()}`);
+  const j = await r.json();
+  if (!Array.isArray(j.embedding) || j.embedding.length !== EMBED_DIM) {
+    throw new Error(`unexpected embedding shape: ${j.embedding?.length}`);
+  }
+  return j.embedding;
+}
+
+/** Make sure the GenesisBlock collection exists with the right dim. Idempotent. */
+async function ensureCollection() {
+  const gdb = await openGraph();
+  const cols = gdb.listCollections();
+  if (cols.some((c) => c.name === COLLECTION)) return;
+  await gdb.createCollection(COLLECTION, EMBED_MODEL, EMBED_DIM, "cosine", null, null, true);
+}
+
 /** Bulk-mirror everything in the SQLite relational DB into GenesisBlock. */
 export async function rebuildFromSqlite(sqlite) {
   const gdb = await openGraph();
@@ -119,6 +148,48 @@ export async function rebuildFromSqlite(sqlite) {
     nodes: nodes.length,
     edges: edges.length,
   };
+}
+
+/**
+ * Generate embeddings for every Message node and stream them into the
+ * `messages` collection. Idempotent — skips ones already vectorised.
+ * Returns counts.
+ */
+export async function embedMessages(sqlite, { batchSize = 32, onProgress } = {}) {
+  await ensureCollection();
+  const gdb = await openGraph();
+
+  // Build a list of (msg_id, text) that still need embeddings. To stay simple
+  // and idempotent we re-add every time — `addVector` overwrites cleanly.
+  const rows = sqlite.prepare("SELECT id, text FROM messages ORDER BY id").all();
+  let done = 0, failed = 0;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    const embeds = await Promise.all(batch.map(async (r) => {
+      try {
+        const v = await embed(r.text);
+        return { id: msgId(r.id), v };
+      } catch (e) {
+        failed++;
+        return null;
+      }
+    }));
+    for (const e of embeds) {
+      if (!e) continue;
+      try { await gdb.addVector(e.id, COLLECTION, e.v); done++; } catch { failed++; }
+    }
+    if (onProgress) onProgress({ done, failed, total: rows.length });
+  }
+  await gdb.flushIndex();
+  await gdb.saveState();
+  return { done, failed, total: rows.length, dim: EMBED_DIM, model: EMBED_MODEL };
+}
+
+/** Vector-only semantic search across stored messages. */
+export async function searchSemantic(queryText, { k = 20 } = {}) {
+  const gdb = await openGraph();
+  const v = await embed(queryText);
+  return gdb.hybridSearch({ queryVector: v, k, collection: COLLECTION, alpha: 1.0 });
 }
 
 /** Walk the neighbours of any node id we mirrored. */
