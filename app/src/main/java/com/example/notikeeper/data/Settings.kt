@@ -10,8 +10,7 @@ import androidx.security.crypto.MasterKey
  * Holds the optional private-cloud upload config + the upload high-water mark.
  */
 object Settings {
-    private fun prefs(context: Context): SharedPreferences {
-        val appCtx = context.applicationContext
+    private fun buildPrefs(appCtx: Context): SharedPreferences {
         val masterKey = MasterKey.Builder(appCtx)
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
@@ -22,6 +21,33 @@ object Settings {
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
+    }
+
+    /**
+     * Open the encrypted prefs, recovering from a corrupted Keystore master
+     * key (AEADBadTagException — happens after backup/restore or partial reset).
+     * When recovery wipes the prefs file the DB passphrase is gone too, so the
+     * encrypted noti.db is also unrecoverable: we delete it next time NotiStore
+     * tries to open it.
+     */
+    private fun prefs(context: Context): SharedPreferences {
+        val appCtx = context.applicationContext
+        return try {
+            buildPrefs(appCtx)
+        } catch (_: Throwable) {
+            // Wipe both the prefs file AND its v1 androidx-security backing
+            // so the master key gets regenerated cleanly on the next call.
+            appCtx.getSharedPreferences("secure_prefs", Context.MODE_PRIVATE).edit().clear().commit()
+            appCtx.deleteSharedPreferences("secure_prefs")
+            try {
+                val ks = java.security.KeyStore.getInstance("AndroidKeyStore")
+                ks.load(null)
+                if (ks.containsAlias("_androidx_security_master_key_")) {
+                    ks.deleteEntry("_androidx_security_master_key_")
+                }
+            } catch (_: Throwable) { /* best effort */ }
+            buildPrefs(appCtx)
+        }
     }
 
     fun getApiUrl(c: Context): String = prefs(c).getString("api_url", "") ?: ""

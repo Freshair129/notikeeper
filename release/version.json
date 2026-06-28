@@ -1,6 +1,6 @@
-{
-  "versionCode": 12,
-  "versionName": "1.11",
+﻿{
+  "versionCode": 13,
+  "versionName": "1.12",
   "url": "https://github.com/Freshair129/notikeeper/releases/latest/download/NotiKeeper.apk",
-  "notes": "NotiKeeper 1.11 — QR Pairing: เปิด PC dashboard กดปุ่ม 'Pair Mobile' แล้วเอามือถือสแกน QR ตั้ง endpoint + token + URL อัปเดตให้อัตโนมัติ ไม่ต้องพิมพ์เอง"
+  "notes": "NotiKeeper 1.12 — แก้บั๊กแอป crash ตอนปลดล็อก (AEADBadTagException จาก Keystore master key เสีย) ตอนนี้ recover เองได้ + งานฝั่ง server: noise filter, relational ETL (SQLite), GenesisBlock graph, BGE-M3 semantic search, MCP tools, dashboard Threads/Graph tab"
 }

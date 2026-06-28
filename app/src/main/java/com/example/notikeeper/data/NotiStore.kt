@@ -253,7 +253,21 @@ class NotiStore private constructor(
                 instance ?: run {
                     val appCtx = context.applicationContext
                     SQLiteDatabase.loadLibs(appCtx)
-                    NotiStore(appCtx, DbKey.getOrCreate(appCtx)).also { instance = it }
+                    val passphrase = DbKey.getOrCreate(appCtx)
+                    val store = try {
+                        NotiStore(appCtx, passphrase).also { it.database.rawQuery("SELECT 1", null).close() }
+                    } catch (_: Throwable) {
+                        // Passphrase no longer matches the on-disk DB (e.g. after
+                        // a Keystore key reset wiped the saved DB key). Drop the
+                        // db so the user can keep using the app; the data on PC
+                        // (data.jsonl) is the recovery path.
+                        appCtx.getDatabasePath("noti.db").let { f ->
+                            f.delete(); java.io.File(f.path + "-journal").delete()
+                        }
+                        NotiStore(appCtx, passphrase)
+                    }
+                    instance = store
+                    store
                 }
             }
     }
