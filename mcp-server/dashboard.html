@@ -48,6 +48,7 @@
     <div class="inline-flex bg-white/[0.03] border border-white/10 rounded-full p-1 text-sm">
       <button class="tab-btn px-4 py-1.5 rounded-full font-semibold" data-tab="feed">📥 Feed</button>
       <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="threads">💬 Threads</button>
+      <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="timeline">📅 Timeline</button>
       <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="graph">🕸️ Graph</button>
     </div>
   </div>
@@ -133,6 +134,52 @@
         <span><span class="inline-block w-3 h-3 rounded-full align-middle" style="background:#9AE6B4"></span> User</span>
         <span><span class="inline-block w-3 h-3 rounded-full align-middle" style="background:#C8D5E5"></span> Message</span>
         <span class="ml-auto">คลิก thread → ขยายดู messages · คลิกพื้นที่ว่าง → ปล่อย</span>
+      </div>
+    </section>
+
+    <!-- Timeline view -->
+    <section id="timeline-view" class="hidden space-y-4">
+      <!-- Controls -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+        <div class="flex items-center gap-3 flex-wrap">
+          <select id="tl-app" class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-[var(--sky)]/50">
+            <option value="">ทุกแอป</option>
+          </select>
+          <label class="flex items-center gap-2 cursor-pointer select-none text-sm">
+            <input id="tl-denoise" type="checkbox" checked class="w-4 h-4 accent-[var(--sky)]">
+            <span>🧹 ตัด noise</span>
+          </label>
+          <button id="tl-reload" class="rounded-xl bg-[var(--sky)] text-[var(--ink)] font-semibold px-4 py-2 text-sm hover:bg-[#9AD5FF] transition">โหลดใหม่</button>
+          <span id="tl-total" class="text-xs text-[var(--muted)] ml-auto"></span>
+        </div>
+      </div>
+
+      <!-- Heatmap -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+        <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h2 class="font-semibold">กิจกรรมรายวัน</h2>
+          <div class="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+            <span>น้อย</span>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(255,255,255,0.05)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,0.20)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,0.45)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,0.75)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,1)"></div>
+            <span>มาก</span>
+          </div>
+        </div>
+        <div id="heatmap-wrap" class="overflow-x-auto pb-2">
+          <div class="text-[var(--muted)] text-sm py-4">กำลังโหลด…</div>
+        </div>
+      </div>
+
+      <!-- Day detail -->
+      <div id="tl-day-detail" class="hidden bg-white/[0.03] border border-white/10 rounded-2xl">
+        <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+          <h2 id="tl-day-title" class="font-semibold">—</h2>
+          <button id="tl-day-close" class="text-xl text-[var(--muted)] hover:text-white leading-none">×</button>
+        </div>
+        <div id="tl-day-msgs" class="p-4 space-y-2 max-h-[55vh] overflow-y-auto"></div>
       </div>
     </section>
 
@@ -421,7 +468,11 @@ function showTab(tab) {
     if (!window.__threadsLoaded) { loadThreads(); window.__threadsLoaded = true; }
   } else if (tab === 'graph') {
     document.querySelector('#graph-view')?.classList.remove('hidden');
+    document.querySelector('#timeline-view')?.classList.add('hidden');
     loadGraph();
+  } else if (tab === 'timeline') {
+    document.querySelector('#timeline-view')?.classList.remove('hidden');
+    if (!window.__tlLoaded) { loadTimeline(); window.__tlLoaded = true; }
   }
 }
 tabBtns.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
@@ -507,6 +558,189 @@ document.querySelector('#graph-reset').addEventListener('click', () => {
   document.querySelector('#graph-app').value = '';
   document.querySelector('#graph-show-msgs').checked = false;
   loadGraph();
+});
+
+// ===== Timeline tab =====
+function countToColor(n) {
+  if (n === 0)   return 'rgba(255,255,255,0.05)';
+  if (n < 5)     return 'rgba(94,193,255,0.20)';
+  if (n < 15)    return 'rgba(94,193,255,0.45)';
+  if (n < 40)    return 'rgba(94,193,255,0.75)';
+  return 'rgba(94,193,255,1)';
+}
+
+function renderHeatmap(days) {
+  const wrap = document.querySelector('#heatmap-wrap');
+  if (!days.length) {
+    wrap.innerHTML = '<div class="text-[var(--muted)] text-sm py-4">ยังไม่มีข้อมูล — รัน scraper หรือ import จาก Facebook ก่อน</div>';
+    return;
+  }
+
+  const map = new Map(days.map(d => [d.date, d]));
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  // Align to Sunday of first week
+  const firstDate = new Date(days[0].date + 'T00:00:00');
+  const start = new Date(firstDate);
+  start.setDate(start.getDate() - start.getDay()); // back to Sunday
+
+  const CELL = 11, GAP = 2;
+  const DAY_LABELS = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+  const outer = document.createElement('div');
+  outer.className = 'flex gap-0.5';
+
+  // Day-of-week labels column
+  const lblCol = document.createElement('div');
+  lblCol.className = 'flex flex-col flex-none text-[10px] text-[var(--muted)] mr-1';
+  lblCol.style.paddingTop = '22px';
+  DAY_LABELS.forEach(l => {
+    const el = document.createElement('div');
+    el.style.cssText = `height:${CELL}px;line-height:${CELL}px;margin-bottom:${GAP}px`;
+    el.textContent = l;
+    lblCol.append(el);
+  });
+  outer.append(lblCol);
+
+  // Week columns
+  let cur = new Date(start);
+  let lastMonth = -1;
+
+  while (cur <= today) {
+    const col = document.createElement('div');
+    col.className = 'flex flex-col';
+    col.style.gap = GAP + 'px';
+
+    // Month label (show only when month changes)
+    const monthEl = document.createElement('div');
+    monthEl.style.cssText = `height:20px;line-height:20px;font-size:10px;white-space:nowrap;color:var(--muted)`;
+    const m = cur.getMonth();
+    if (m !== lastMonth) {
+      monthEl.textContent = cur.toLocaleDateString('th-TH', { month: 'short', year: 'numeric' })
+        .replace(' ', ' '); // non-breaking space keeps month+year together
+      lastMonth = m;
+    }
+    col.append(monthEl);
+
+    // 7 day cells (Sun–Sat)
+    for (let dow = 0; dow < 7; dow++) {
+      const day = new Date(cur);
+      day.setDate(cur.getDate() + dow);
+
+      const cell = document.createElement('div');
+      cell.style.cssText = `width:${CELL}px;height:${CELL}px;border-radius:2px;flex-shrink:0`;
+
+      if (day > today) {
+        cell.style.background = 'transparent';
+      } else {
+        const ds    = day.toISOString().slice(0, 10);
+        const info  = map.get(ds);
+        const count = info?.count || 0;
+        cell.style.background = countToColor(count);
+        cell.title = `${ds}: ${count} ข้อความ${info?.topApp ? '\n' + info.topApp : ''}`;
+        if (count > 0) {
+          cell.style.cursor = 'pointer';
+          cell.addEventListener('click', () => showDayDetail(ds));
+        }
+      }
+      col.append(cell);
+    }
+
+    outer.append(col);
+    cur.setDate(cur.getDate() + 7);
+  }
+
+  wrap.innerHTML = '';
+  wrap.append(outer);
+}
+
+async function loadTimeline() {
+  const app     = document.querySelector('#tl-app')?.value || '';
+  const denoise = document.querySelector('#tl-denoise')?.checked ? '1' : '0';
+  const params  = new URLSearchParams({ denoise });
+  if (app) params.set('app', app);
+
+  const data = await (await fetch('/api/timeline?' + params)).json();
+  document.querySelector('#tl-total').textContent =
+    `${data.total.toLocaleString()} ข้อความ · ${data.days.length.toLocaleString()} วัน`;
+
+  // Populate app dropdown once
+  const tlApp = document.querySelector('#tl-app');
+  if (tlApp && tlApp.options.length <= 1) {
+    const stats = await (await fetch('/api/stats')).json();
+    for (const a of Object.keys(stats.byApp || {})) {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = `${a} (${stats.byApp[a]})`;
+      tlApp.append(opt);
+    }
+  }
+
+  renderHeatmap(data.days);
+}
+
+async function showDayDetail(dateStr) {
+  const detail = document.querySelector('#tl-day-detail');
+  const title  = document.querySelector('#tl-day-title');
+  const msgs   = document.querySelector('#tl-day-msgs');
+
+  const d = new Date(dateStr + 'T00:00:00');
+  title.textContent = d.toLocaleDateString('th-TH', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+  });
+  detail.classList.remove('hidden');
+  msgs.innerHTML = '<div class="text-[var(--muted)] text-sm animate-pulse">กำลังโหลด…</div>';
+
+  const since = d.getTime();
+  const until = since + 86400000;
+  const app     = document.querySelector('#tl-app')?.value || '';
+  const denoise = document.querySelector('#tl-denoise')?.checked ? '1' : '0';
+  const params  = new URLSearchParams({ since, until, limit: 500, denoise });
+  if (app) params.set('app', app);
+
+  const res     = await (await fetch('/api/messages?' + params)).json();
+  const dayMsgs = res.rows.slice().sort((a, b) => a.time - b.time);
+
+  if (!dayMsgs.length) {
+    msgs.innerHTML = '<div class="text-[var(--muted)] text-sm">ไม่มีข้อความในวันนี้</div>';
+    return;
+  }
+
+  msgs.innerHTML = dayMsgs.map(r => {
+    const me  = r.side === 'me';
+    const t   = new Date(r.time).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    const who = me ? 'me' : (r.title || r.app || '?');
+    return `<div class="flex ${me ? 'justify-end' : 'justify-start'}">
+      <div class="max-w-[82%] rounded-2xl px-3 py-2 ${me
+        ? 'bg-[var(--sky)]/15 border border-[var(--sky)]/20'
+        : 'bg-white/[0.04] border border-white/10'}">
+        <div class="text-[10px] text-[var(--muted)] mb-0.5 flex gap-2 flex-wrap">
+          <span class="font-semibold">${escapeHtml(r.app)}${r.title ? ' · ' + escapeHtml(r.title) : ''}</span>
+          <span class="mono">${t}</span>
+        </div>
+        <div class="text-sm whitespace-pre-wrap break-words">${escapeHtml(r.text)}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+document.querySelector('#tl-reload')?.addEventListener('click', () => {
+  window.__tlLoaded = false; // force reload
+  loadTimeline();
+  window.__tlLoaded = true;
+});
+document.querySelector('#tl-app')?.addEventListener('change', () => {
+  loadTimeline();
+  window.__tlLoaded = true;
+});
+document.querySelector('#tl-denoise')?.addEventListener('change', () => {
+  loadTimeline();
+  window.__tlLoaded = true;
+});
+document.querySelector('#tl-day-close')?.addEventListener('click', () => {
+  document.querySelector('#tl-day-detail')?.classList.add('hidden');
 });
 
 loadAll();

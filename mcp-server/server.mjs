@@ -146,11 +146,12 @@ const isNoise = (r) => classifyNoise(r) !== null;
 // ---------- helpers used by every layer ----------
 const byNewest = (a, b) => b.time - a.time;
 
-function filterRows({ query, app, source, sinceMs, denoise = false }) {
+function filterRows({ query, app, source, sinceMs, untilMs, denoise = false }) {
   const q = (query || "").toLowerCase();
   const a = (app || "").toLowerCase();
   return rows.filter((r) => {
     if (sinceMs && r.time < sinceMs) return false;
+    if (untilMs && r.time >= untilMs) return false;
     if (source && r.source !== source) return false;
     if (a && !(r.app || "").toLowerCase().includes(a)) return false;
     if (q && !((r.text || "").toLowerCase().includes(q) ||
@@ -216,14 +217,39 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "GET" && url.pathname === "/api/messages") {
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "200", 10), 5000);
     const filtered = filterRows({
-      query:  url.searchParams.get("q") || "",
-      app:    url.searchParams.get("app") || "",
-      source: url.searchParams.get("source") || "",
+      query:   url.searchParams.get("q") || "",
+      app:     url.searchParams.get("app") || "",
+      source:  url.searchParams.get("source") || "",
       sinceMs: parseInt(url.searchParams.get("since") || "0", 10) || 0,
+      untilMs: parseInt(url.searchParams.get("until") || "0", 10) || 0,
       denoise: url.searchParams.get("denoise") === "1",
     }).sort(byNewest).slice(0, limit);
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ total: filtered.length, all: rows.length, rows: filtered }));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/timeline") {
+    const app    = url.searchParams.get("app") || "";
+    const denoise = url.searchParams.get("denoise") === "1";
+    const filtered = filterRows({ app, denoise });
+    const byDay = new Map();
+    for (const r of filtered) {
+      const date = new Date(r.time).toISOString().slice(0, 10);
+      if (!byDay.has(date)) byDay.set(date, { count: 0, apps: {} });
+      const d = byDay.get(date);
+      d.count++;
+      d.apps[r.app] = (d.apps[r.app] || 0) + 1;
+    }
+    const days = [...byDay.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([date, d]) => ({
+        date,
+        count:  d.count,
+        topApp: Object.entries(d.apps).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "",
+      }));
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ days, total: filtered.length }));
     return;
   }
 
