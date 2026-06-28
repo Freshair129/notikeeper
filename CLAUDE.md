@@ -9,6 +9,18 @@ behind a biometric lock, and can export/upload/read aloud. Companion Node MCP
 server lets Claude search the archive. **Personal-use tool** for the device
 owner's own data — not a Play-Store product.
 
+**Current: v1.12** (versionCode 13). Published at
+`Freshair129/notikeeper` (public). Landing: https://notikeeper.vercel.app
+
+Three moving parts:
+1. **Android app** (`app/`) — capture + encrypted store + UI + read-aloud + self-update.
+2. **MCP/analytics server** (`mcp-server/`, Node, port 8765) — ingest endpoint,
+   browser dashboard, SQLite relational ETL, GenesisBlock graph + BGE-M3 vectors,
+   MCP tools for Claude. **Dies on every Claude-session teardown** — restart with
+   `Start-Process node -ArgumentList '"G:\NotiKeeper\mcp-server\server.mjs"' -WindowStyle Hidden`
+   (or the `NotiKeeper Control.cmd` GUI / Startup auto-start shortcut).
+3. **Landing page** (`landing/`, React 19 + Vite) — deployed to Vercel, git-auto-deploy.
+
 ## Boundaries (do NOT cross without asking)
 - **Privacy model is core, not decoration.** Don't add telemetry, analytics, or
   network calls outside the user-configured upload endpoint and the update
@@ -22,6 +34,12 @@ owner's own data — not a Play-Store product.
 - **Don't bump `versionCode` without releasing.** The in-app updater compares
   this number — bumping it locally without a matching release will make every
   install think it's outdated.
+- **Vercel landing: Root Directory MUST stay `landing`** (set via project
+  settings/REST API, not vercel.json). `vercel.json` must NOT contain comment
+  keys — Vercel rejects unknown props and the deploy errors.
+- **Capture vs read-aloud whitelists are different.** `Settings.shouldCapture`
+  decides if a row is *stored*; `Settings.shouldSpeak` decides if it's *spoken*.
+  Empty set = all (for both).
 
 ## How to build
 Toolchain is portable at `D:\abuild` (JDK17 / Android SDK / Gradle 8.9).
@@ -44,16 +62,39 @@ Full detail: `RELEASE.md`. Architecture: `ARCHITECTURE.md`. Threat model: `SECUR
 ## Repo map
 ```
 app/                       Android app (Kotlin/Compose)
-  src/main/java/.../        MainActivity, services, Updater, Speaker, Exporter
-  src/main/java/.../data/   NotiStore (SQLCipher), Settings, DbKey
-  src/main/res/             icon (adaptive vector), accessibility config
-mcp-server/                Node MCP server (ingest + Claude tools)
+  src/main/java/.../        MainActivity (List/Backup/Dashboard screens),
+                            services, Updater, Speaker, Exporter, InstalledApps
+  src/main/java/.../data/   NotiStore (SQLCipher + getStats), Settings, DbKey
+  src/main/res/             adaptive icon, accessibility config
+mcp-server/                Node server — see "analytics server" below
+  server.mjs               HTTP (ingest/dashboard/SSE/pair/graph APIs) + MCP stdio
+  relations.mjs            SQLite ETL → apps/users/threads/messages/participants
+  graph-index.mjs          GenesisBlock graph + BGE-M3 embeddings (Ollama)
+  dashboard.html           Feed / Threads / Graph tabs (Tailwind + vis-network CDN)
+  NotiKeeper-Control.ps1   WinForms control GUI (start/stop/auto-start)
+landing/                   React 19 + Vite landing page (→ Vercel)
+docs/                      PRD, BRD, COMPETITIVE-BRIEF
 release/version.json       Manifest the in-app updater fetches
-RELEASE.md                 Release process
-ARCHITECTURE.md            System overview + diagrams
-SECURITY.md                Threat model + encryption choices
-CHANGELOG.md               Version history
+RELEASE.md ARCHITECTURE.md SECURITY.md CHANGELOG.md LICENSE
 ```
+
+## Analytics server (mcp-server/) — data pipeline
+```
+data.jsonl  (append-only raw, the app POSTs here via /ingest)
+  → relations.mjs  ETL → SQLite (relations.db): Messenger-style schema,
+                   aggressive chrome-label noise filter
+  → graph-index.mjs mirror → GenesisBlock (graph.db): nodes/edges + HQL,
+                   + BGE-M3 1024d vectors (collection "messages", cosine HNSW)
+                   via local Ollama `bge-m3` (~190ms/embed)
+```
+- GenesisBlock = Rust napi DB `@freshair129/gks-genesis-block-native`
+  (source at `G:\GenesisBlock_Dev\GenesisBlock`). HQL ids with `:` need quotes.
+- HTTP: `/ingest` `/` (dashboard) `/events` (SSE) `/api/{messages,stats,threads,
+  threads/:id,users,relations,pair,pair-qr,graph/*}`.
+- MCP tools: `search_messages` `recent_messages` `list_apps` `stats`
+  `semantic_search` `find_similar` `graph_neighbors` `hql` `thread_summary`.
+- Runtime DBs (`relations.db*`, `graph.db/`, `data.jsonl`, node_modules) are
+  gitignored — never commit them.
 
 ## House style
 - Kotlin: idiomatic, no over-abstraction. Services are small; UI is one
@@ -63,10 +104,25 @@ CHANGELOG.md               Version history
   don't crash. Internal calls trust each other.
 
 ## Useful entry points
-- Notification capture → `NotiLoggerService.kt`
+- Notification capture → `NotiLoggerService.kt` (`Settings.shouldCapture` gate)
 - Screen-text capture → `MessengerReaderService.kt`
 - Encrypted storage → `data/NotiStore.kt` + `data/DbKey.kt`
+- Settings + Keystore-corruption recovery → `data/Settings.kt`
 - TTS read-aloud → `Speaker.kt` (+ `Settings.shouldSpeak`)
 - Self-update → `Updater.kt`
-- Export / API upload → `Exporter.kt`
-- MCP integration → `mcp-server/server.mjs`
+- Export / API upload / QR pairing → `Exporter.kt`, `MainActivity` BackupScreen
+- In-app dashboard → `MainActivity` DashboardScreen (`NotiStore.getStats`)
+- MCP + ingest + dashboard → `mcp-server/server.mjs`
+- Relational ETL → `mcp-server/relations.mjs`
+- Graph + embeddings → `mcp-server/graph-index.mjs`
+
+## Known gotchas (learned the hard way)
+- **`AEADBadTagException` on unlock** = corrupted Keystore master key. `Settings.prefs()`
+  recovers by wiping `secure_prefs` + deleting `_androidx_security_master_key_`.
+  Side effect: the SQLCipher DB key is lost too, so `noti.db` resets. (Fixed v1.12.)
+- **Android 9+ blocks cleartext HTTP** — `usesCleartextTraffic=true` lets LAN
+  upload (`http://192.168.x.x:8765/ingest`) work. (Fixed v1.7.)
+- **ADB live-scrape works**: phone paired via wireless adb; Messenger is NOT
+  FLAG_SECURE so `uiautomator dump` reads the chat. For battery, set
+  `stay_on_while_plugged_in=3` + min brightness (true screen-off can't render UI).
+- Server logs to **stderr only** (stdout is the MCP stdio channel).
