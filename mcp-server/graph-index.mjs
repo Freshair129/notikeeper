@@ -22,6 +22,7 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { searchLexical } from "./relations.mjs";
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -185,11 +186,90 @@ export async function embedMessages(sqlite, { batchSize = 32, onProgress } = {})
   return { done, failed, total: rows.length, dim: EMBED_DIM, model: EMBED_MODEL };
 }
 
-/** Vector-only semantic search across stored messages. */
-export async function searchSemantic(queryText, { k = 20 } = {}) {
+/**
+ * Vector (dense) semantic search across stored messages.
+ *
+ * NOTE on `alpha`: GenesisBlock's `hybridSearch` ranks by
+ *   score = similarity * (1 - alpha) + K-Impact * alpha
+ * so alpha=0 is pure vector similarity and alpha=1 is pure graph authority.
+ * We default to 0.0 (vector only) — K-Impact's authority dimension is built for
+ * a governance knowledge graph (MASTER/SPEC/ADR tiers) and degenerates to plain
+ * degree-centrality on chat data, so it is not a useful relevance signal here.
+ * (Previously this passed alpha=1.0, which silently ranked by K-Impact alone.)
+ */
+export async function searchSemantic(queryText, { k = 20, alpha = 0.0 } = {}) {
   const gdb = await openGraph();
   const v = await embed(queryText);
-  return gdb.hybridSearch({ queryVector: v, k, collection: COLLECTION, alpha: 1.0 });
+  return gdb.hybridSearch({ queryVector: v, k, collection: COLLECTION, alpha });
+}
+
+/** Dense retrieval as a plain ranked id list ("msg:<id>"), best first. */
+export async function searchDense(queryText, { k = 50 } = {}) {
+  const hits = await searchSemantic(queryText, { k, alpha: 0.0 });
+  return hits.map((h) => (h.node || h).id);
+}
+
+/**
+ * Reciprocal Rank Fusion — the industry-standard way to merge ranked lists from
+ * heterogeneous retrievers (dense + sparse) without score normalisation.
+ *   RRF(d) = Σ_lists 1 / (k + rank_list(d))      (k=60 is the conventional default)
+ * Robust because it uses *ranks*, not raw scores, so cosine vs BM25 scale never
+ * has to be reconciled. Returns [{ id, score }] sorted best-first.
+ */
+export function rrfFuse(rankedLists, { k = 60, limit = 20 } = {}) {
+  const score = new Map();
+  for (const list of rankedLists) {
+    list.forEach((id, i) => {
+      score.set(id, (score.get(id) || 0) + 1 / (k + i + 1));
+    });
+  }
+  return [...score.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([id, s]) => ({ id, score: s }));
+}
+
+/**
+ * Hybrid search: dense (bge-m3 vectors in GenesisBlock) + sparse (SQLite FTS5
+ * BM25), fused with RRF. SQLite stays the source of truth, so we hydrate the
+ * final hits from it. Returns rows shaped like `fmtHit` expects
+ * ({ node:{id,labels,props}, score, sources }).
+ */
+export async function searchHybridRRF(sqlite, queryText, { k = 20, candidates = 50, rrfK = 60 } = {}) {
+  const [dense, sparse] = await Promise.all([
+    searchDense(queryText, { k: candidates }),
+    Promise.resolve(searchLexical(sqlite, queryText, { limit: candidates })),
+  ]);
+  const fused = rrfFuse([dense, sparse], { k: rrfK, limit: k });
+  if (!fused.length) return [];
+
+  const denseSet = new Set(dense);
+  const sparseSet = new Set(sparse);
+  const ids = fused.map((f) => Number(f.id.slice(4))); // strip "msg:"
+  const rows = sqlite
+    .prepare(
+      `SELECT m.id, m.text, m.side, m.time, m.thread_id, m.source, u.name AS sender
+       FROM messages m LEFT JOIN users u ON u.id = m.sender_id
+       WHERE m.id IN (${ids.map(() => "?").join(",")})`
+    )
+    .all(...ids);
+  const byId = new Map(rows.map((r) => [r.id, r]));
+
+  return fused.map((f) => {
+    const m = byId.get(Number(f.id.slice(4)));
+    return {
+      node: {
+        id: f.id,
+        labels: ["Message", m?.source === "noti" ? "Notification" : "ScreenLine"],
+        props: m
+          ? { text: m.text, side: m.side, time: m.time,
+              thread_id: m.thread_id, sender: m.sender, source: m.source }
+          : {},
+      },
+      score: f.score,
+      sources: [denseSet.has(f.id) && "dense", sparseSet.has(f.id) && "sparse"].filter(Boolean),
+    };
+  });
 }
 
 /** Walk the neighbours of any node id we mirrored. */

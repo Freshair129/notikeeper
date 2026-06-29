@@ -68,7 +68,15 @@ export function openDb(filePath) {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  // Detect whether the FTS index already exists *before* initSchema creates it,
+  // so we only (re)build it when it was just created — either a fresh DB or an
+  // older relations.db migrating up. (We can't compare row counts: count(*) on
+  // an external-content FTS5 table reflects the content table, not the index.)
+  const ftsExisted = !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts'")
+    .get();
   initSchema(db);
+  if (!ftsExisted) backfillFts(db);
   return db;
 }
 
@@ -128,7 +136,69 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_msg_thread_time ON messages(thread_id, time);
     CREATE INDEX IF NOT EXISTS idx_msg_sender      ON messages(sender_id);
     CREATE INDEX IF NOT EXISTS idx_msg_time        ON messages(time);
+
+    -- Lexical (sparse) retrieval over message text. The 'trigram' tokenizer is
+    -- the only FTS5 tokenizer that works for Thai/CJK (no whitespace word
+    -- boundaries) — it indexes 3-char substrings and ranks with BM25. This is
+    -- the sparse half of the hybrid RRF search; the dense half is the bge-m3
+    -- vector index in GenesisBlock. External-content table mirrors messages(text)
+    -- and is kept in lock-step by the triggers below.
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+      text,
+      content='messages',
+      content_rowid='id',
+      tokenize='trigram'
+    );
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+      INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text) VALUES('delete', old.id, old.text);
+    END;
+    CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+      INSERT INTO messages_fts(messages_fts, rowid, text) VALUES('delete', old.id, old.text);
+      INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+    END;
   `);
+}
+
+/**
+ * (Re)build the whole FTS index from the messages content table. Called only
+ * right after the FTS table is first created (see openDb), so the triggers can
+ * then keep it incrementally in sync for every later write.
+ */
+function backfillFts(db) {
+  db.exec("INSERT INTO messages_fts(messages_fts) VALUES('rebuild')");
+}
+
+/**
+ * Build an FTS5 MATCH expression from free user text.
+ * - Returns null for queries shorter than a trigram (FTS5 trigram needs >= 3 chars).
+ * - Splits on whitespace and ORs the >=3-char chunks as phrases (good for English
+ *   / mixed queries). For continuous Thai (no spaces) it falls back to matching
+ *   the whole string as one phrase — which catches exact substrings such as
+ *   names, numbers, "7-11", etc. (Semantic recall for Thai is the dense half's job.)
+ */
+export function ftsQuery(text) {
+  const t = (text || "").trim();
+  if (t.length < 3) return null;
+  const phrase = (w) => '"' + w.replace(/"/g, '""') + '"';
+  const parts = t.split(/\s+/).filter((w) => w.length >= 3);
+  const terms = (parts.length ? parts : [t]).map(phrase);
+  return terms.join(" OR ");
+}
+
+/**
+ * Sparse retrieval: top message ids by BM25, in rank order (best first).
+ * Returns stable graph ids ("msg:<id>") so they fuse 1:1 with the dense list.
+ */
+export function searchLexical(db, query, { limit = 50 } = {}) {
+  const q = ftsQuery(query);
+  if (!q) return [];
+  const rows = db.prepare(
+    `SELECT rowid AS id FROM messages_fts WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?`
+  ).all(q, limit);
+  return rows.map((r) => `msg:${r.id}`);
 }
 
 /** Cached prepared statements per db instance. */
@@ -196,6 +266,12 @@ function parseRow(r) {
 
   let threadName = title || "(no title)";
   let senderName = null;
+
+  // ADB scraper supplies the real sender name (from Messenger's a11y description).
+  if (r.sender && String(r.sender).trim()) {
+    senderName = String(r.sender).trim();
+    return { app, pkg, threadName, senderName, text, time: r.time, source, side, rawId: r.id };
+  }
 
   if (source === "noti") {
     // try to peel "Sender: message" out of the body (group chats often do this)
