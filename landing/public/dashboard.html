@@ -1,0 +1,1064 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NotiKeeper Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Sarabun:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root { --ink:#0F1B2D; --ink-2:#15243A; --sky:#5EC1FF; --gold:#FFC857; --paper:#E6EEF8; --paper-2:#C8D5E5; --muted:#8FA4BC; }
+  body { font-family:'Sarabun','Inter',sans-serif; background:var(--ink); color:var(--paper); }
+  .mono { font-family:'JetBrains Mono', monospace; }
+  ::selection { background: var(--sky); color: var(--ink); }
+  .pulse-dot { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.35 } }
+  .row-enter { animation: slideIn .35s ease-out; }
+  @keyframes slideIn { from { opacity:0; transform: translateY(-6px) } to { opacity:1; transform:none } }
+</style>
+</head>
+<body class="min-h-screen">
+<!-- PIN Auth Gate -->
+<div id="pin-gate" class="fixed inset-0 z-[999] flex flex-col items-center justify-center bg-[#0F1B2D]">
+  <div class="bg-[#15243A] border border-white/10 rounded-2xl p-8 w-full max-w-xs shadow-2xl text-center">
+    <div class="text-3xl mb-4">🔒</div>
+    <h2 class="text-lg font-semibold mb-1" id="pin-title">NotiKeeper</h2>
+    <p class="text-xs text-[#8FA4BC] mb-6" id="pin-sub">ใส่รหัสผ่าน</p>
+    <div class="flex gap-2 justify-center mb-4" id="pin-dots">
+      <div class="w-3 h-3 rounded-full border-2 border-white/20" id="d0"></div>
+      <div class="w-3 h-3 rounded-full border-2 border-white/20" id="d1"></div>
+      <div class="w-3 h-3 rounded-full border-2 border-white/20" id="d2"></div>
+      <div class="w-3 h-3 rounded-full border-2 border-white/20" id="d3"></div>
+    </div>
+    <div class="grid grid-cols-3 gap-2 mb-4" id="pin-pad"></div>
+    <p id="pin-err" class="text-xs text-red-400 h-4"></p>
+    <button onclick="pinReset()" id="pin-change-btn"
+      class="mt-3 text-xs text-[#8FA4BC] hover:text-white underline hidden">เปลี่ยนรหัส</button>
+  </div>
+  <div class="mt-6 text-xs text-[#8FA4BC]">
+    <button onclick="openServerCfg()" class="hover:text-white transition">⚙️ Server URL</button>
+  </div>
+</div>
+
+<!-- Server URL Config Modal -->
+<div id="server-modal" class="fixed inset-0 z-[1000] hidden items-center justify-center bg-black/60">
+  <div class="bg-[#15243A] border border-white/10 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
+    <h3 class="font-semibold mb-1">⚙️ Server URL</h3>
+    <p class="text-xs text-[#8FA4BC] mb-4">
+      ว่าง = same origin (localhost). ใส่เมื่อใช้จากภายนอก เช่น
+      <span class="mono text-[#5EC1FF]">http://192.168.1.x:8765</span>
+    </p>
+    <input id="server-input" type="url" placeholder="http://192.168.1.x:8765"
+      class="w-full bg-[#0F1B2D] border border-white/10 rounded-xl px-3 py-2.5 text-sm mb-4
+             focus:outline-none focus:border-[#5EC1FF]/50" />
+    <div class="flex gap-2">
+      <button onclick="saveServerCfg()"
+        class="flex-1 bg-[#5EC1FF] text-[#0F1B2D] font-semibold py-2 rounded-xl text-sm
+               hover:bg-[#9AD5FF] transition">บันทึก</button>
+      <button onclick="closeServerCfg()"
+        class="flex-1 bg-white/5 border border-white/10 py-2 rounded-xl text-sm
+               hover:bg-white/10 transition">ยกเลิก</button>
+    </div>
+  </div>
+</div>
+
+  <header class="sticky top-0 z-20 backdrop-blur-xl bg-[#0F1B2D]/80 border-b border-white/5">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-[#1B3A66] grid place-items-center">
+          <span class="text-[#5EC1FF] text-lg">🔔</span>
+        </div>
+        <div>
+          <div class="font-semibold leading-tight">NotiKeeper</div>
+          <div class="text-xs text-[var(--muted)] leading-tight">Dashboard</div>
+        </div>
+        <div id="live-pill" class="ml-3 inline-flex items-center gap-2 text-xs px-2.5 py-1 rounded-full border border-white/10">
+          <span id="live-dot" class="w-1.5 h-1.5 rounded-full bg-[var(--muted)] pulse-dot"></span>
+          <span id="live-label" class="text-[var(--muted)]">connecting…</span>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 text-xs">
+        <span class="text-[var(--muted)]">รวม</span>
+        <span id="total-pill" class="mono px-2 py-1 rounded bg-white/5 border border-white/10 text-white">0</span>
+        <span class="text-[var(--muted)]">ข้อความ</span>
+        <button id="pair-header" class="ml-1 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--gold)]/90 text-[var(--ink)] font-semibold hover:bg-[var(--gold)] transition text-xs">
+          📱 QR
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Tab bar -->
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 pt-4">
+    <div class="inline-flex bg-white/[0.03] border border-white/10 rounded-full p-1 text-sm">
+      <button class="tab-btn px-4 py-1.5 rounded-full font-semibold" data-tab="feed">📥 Feed</button>
+      <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="threads">💬 Threads</button>
+      <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="chat">💬 Chat</button>
+      <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="timeline">📅 Timeline</button>
+      <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="graph">🕸️ Graph</button>
+    </div>
+  </div>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
+    <!-- Controls -->
+    <section class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+      <div class="grid gap-3 sm:grid-cols-[1fr_180px_140px_auto_auto]">
+        <input id="q" type="text" placeholder="ค้นหา (แอป / ผู้ส่ง / ข้อความ)"
+          class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-4 py-2.5 text-sm placeholder-[var(--muted)] focus:outline-none focus:border-[var(--sky)]/50" />
+        <select id="app-filter" class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-[var(--sky)]/50">
+          <option value="">ทุกแอป</option>
+        </select>
+        <select id="source-filter" class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-[var(--sky)]/50">
+          <option value="">ทุก source</option>
+          <option value="noti">แจ้งเตือน</option>
+          <option value="screen">หน้าจอ</option>
+        </select>
+        <button id="pair" class="rounded-xl bg-[var(--gold)] text-[var(--ink)] font-semibold px-5 py-2.5 text-sm hover:bg-[#ffd887] transition flex items-center justify-center gap-1.5">📱 Pair Mobile</button>
+        <button id="reload" class="rounded-xl bg-[var(--sky)] text-[var(--ink)] font-semibold px-5 py-2.5 text-sm hover:bg-[#9AD5FF] transition">โหลดใหม่</button>
+      </div>
+      <div class="mt-3 flex items-center gap-3 flex-wrap text-xs">
+        <label class="flex items-center gap-2 cursor-pointer select-none">
+          <input id="denoise-toggle" type="checkbox" checked class="w-4 h-4 accent-[var(--sky)]">
+          <span class="font-semibold">🧹 ตัด noise</span>
+          <span id="noise-summary" class="text-[var(--muted)]">—</span>
+        </label>
+        <span class="text-[var(--muted)]">·</span>
+        <button data-claude="recent_messages from LINE limit 20" class="claude-quick px-3 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition">💬 ถาม Claude: LINE ล่าสุด</button>
+        <button data-claude="search_messages for the word 'address' in notikeeper" class="claude-quick px-3 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition">🔍 ค้นคำว่า "address"</button>
+        <button data-claude="give me notikeeper stats and the top 5 apps by message count" class="claude-quick px-3 py-1.5 rounded-full bg-white/5 border border-white/10 hover:bg-white/10 transition">📊 สถิติ + top apps</button>
+        <span class="text-[var(--muted)] ml-auto">คลิกเพื่อก๊อปคำสั่งให้วางใน Claude Desktop</span>
+      </div>
+    </section>
+
+    <!-- Stats -->
+    <section id="stats-grid" class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"></section>
+
+    <!-- Messages -->
+    <section class="bg-white/[0.03] border border-white/10 rounded-2xl">
+      <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+        <h2 class="font-semibold">ข้อความล่าสุด</h2>
+        <span id="shown-pill" class="text-xs text-[var(--muted)]">—</span>
+      </div>
+      <div id="rows" class="divide-y divide-white/5 max-h-[60vh] overflow-y-auto"></div>
+    </section>
+
+    <!-- Threads view -->
+    <section id="threads-view" class="hidden grid gap-4 lg:grid-cols-[360px_1fr]">
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl">
+        <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+          <h2 class="font-semibold">💬 Threads</h2>
+          <span id="threads-count" class="text-xs text-[var(--muted)]">—</span>
+        </div>
+        <div id="threads-list" class="max-h-[70vh] overflow-y-auto divide-y divide-white/5"></div>
+      </div>
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl">
+        <div id="thread-header" class="px-4 py-3 border-b border-white/5">
+          <h2 class="font-semibold text-[var(--muted)]">เลือก thread ทางซ้าย</h2>
+        </div>
+        <div id="thread-body" class="max-h-[70vh] overflow-y-auto p-4 space-y-2"></div>
+      </div>
+    </section>
+
+    <!-- Graph view -->
+    <section id="graph-view" class="hidden bg-white/[0.03] border border-white/10 rounded-2xl overflow-hidden">
+      <div class="px-4 py-3 border-b border-white/5 flex items-center gap-3 flex-wrap">
+        <h2 class="font-semibold">🕸️ Graph</h2>
+        <select id="graph-app" class="bg-[var(--ink-2)] border border-white/10 rounded-lg px-3 py-1.5 text-sm">
+          <option value="">All apps</option>
+        </select>
+        <label class="flex items-center gap-2 text-xs cursor-pointer">
+          <input id="graph-show-msgs" type="checkbox" class="w-4 h-4 accent-[var(--sky)]">
+          <span>โชว์ messages (เฉพาะ thread เดียว)</span>
+        </label>
+        <button id="graph-reset" class="ml-auto px-3 py-1.5 text-xs rounded-lg bg-white/5 border border-white/10 hover:bg-white/10">↺ Reset</button>
+        <span id="graph-count" class="text-xs text-[var(--muted)]">—</span>
+      </div>
+      <div id="graph-canvas" style="height: 72vh; background: #0B1322;"></div>
+      <div class="px-4 py-2 border-t border-white/5 text-xs text-[var(--muted)] flex items-center gap-4 flex-wrap">
+        <span><span class="inline-block w-3 h-3 rounded-full align-middle" style="background:#5EC1FF"></span> App</span>
+        <span><span class="inline-block w-3 h-3 rotate-45 align-middle" style="background:#FFC857"></span> Thread</span>
+        <span><span class="inline-block w-3 h-3 rounded-full align-middle" style="background:#9AE6B4"></span> User</span>
+        <span><span class="inline-block w-3 h-3 rounded-full align-middle" style="background:#C8D5E5"></span> Message</span>
+        <span class="ml-auto">คลิก thread → ขยายดู messages · คลิกพื้นที่ว่าง → ปล่อย</span>
+      </div>
+    </section>
+
+    <!-- Timeline view -->
+    <section id="timeline-view" class="hidden space-y-4">
+      <!-- Controls -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+        <div class="flex items-center gap-3 flex-wrap">
+          <select id="tl-app" class="bg-[var(--ink-2)] border border-white/10 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-[var(--sky)]/50">
+            <option value="">ทุกแอป</option>
+          </select>
+          <label class="flex items-center gap-2 cursor-pointer select-none text-sm">
+            <input id="tl-denoise" type="checkbox" checked class="w-4 h-4 accent-[var(--sky)]">
+            <span>🧹 ตัด noise</span>
+          </label>
+          <button id="tl-reload" class="rounded-xl bg-[var(--sky)] text-[var(--ink)] font-semibold px-4 py-2 text-sm hover:bg-[#9AD5FF] transition">โหลดใหม่</button>
+          <span id="tl-total" class="text-xs text-[var(--muted)] ml-auto"></span>
+        </div>
+      </div>
+
+      <!-- Heatmap -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+        <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <h2 class="font-semibold">กิจกรรมรายวัน</h2>
+          <div class="flex items-center gap-1.5 text-[10px] text-[var(--muted)]">
+            <span>น้อย</span>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(255,255,255,0.05)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,0.20)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,0.45)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,0.75)"></div>
+            <div class="w-2.5 h-2.5 rounded-sm" style="background:rgba(94,193,255,1)"></div>
+            <span>มาก</span>
+          </div>
+        </div>
+        <div id="heatmap-wrap" class="overflow-x-auto pb-2">
+          <div class="text-[var(--muted)] text-sm py-4">กำลังโหลด…</div>
+        </div>
+      </div>
+
+      <!-- Day detail -->
+      <div id="tl-day-detail" class="hidden bg-white/[0.03] border border-white/10 rounded-2xl">
+        <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+          <h2 id="tl-day-title" class="font-semibold">—</h2>
+          <button id="tl-day-close" class="text-xl text-[var(--muted)] hover:text-white leading-none">×</button>
+        </div>
+        <div id="tl-day-msgs" class="p-4 space-y-2 max-h-[55vh] overflow-y-auto"></div>
+      </div>
+    </section>
+
+    <!-- Chat log view -->
+    <section id="chat-view" class="hidden grid gap-4 lg:grid-cols-[280px_1fr]" style="min-height:70vh">
+      <!-- Thread list sidebar -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl flex flex-col">
+        <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+          <h2 class="font-semibold">💬 Messenger Chats</h2>
+          <button id="chat-rebuild" title="Rebuild chat log" class="text-xs text-[var(--muted)] hover:text-white px-2 py-1 rounded-lg hover:bg-white/5 transition">🔄</button>
+        </div>
+        <div id="chat-list" class="flex-1 overflow-y-auto divide-y divide-white/5"></div>
+      </div>
+      <!-- Message panel -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl flex flex-col">
+        <div id="chat-panel-header" class="px-4 py-3 border-b border-white/5 flex items-center gap-3">
+          <span class="font-semibold text-[var(--muted)]">เลือกชื่อทางซ้าย</span>
+        </div>
+        <div id="chat-panel-body" class="flex-1 overflow-y-auto px-4 py-3 space-y-1"></div>
+      </div>
+    </section>
+
+    <!-- Pairing modal -->
+    <div id="pair-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+      <div class="bg-[var(--ink-2)] border border-white/10 rounded-2xl max-w-md w-full p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-semibold text-lg">📱 Pair Mobile</h3>
+          <button id="pair-close" class="text-2xl text-[var(--muted)] hover:text-white leading-none">×</button>
+        </div>
+        <p class="text-sm text-[var(--paper-2)] mb-4">
+          เปิดแอป NotiKeeper บนมือถือ → หน้า "สำรอง" → กดปุ่ม <span class="font-semibold text-white">"📷 สแกน QR"</span> แล้วจ่อกล้องไปที่ QR ด้านล่าง
+        </p>
+        <div class="bg-white p-4 rounded-xl flex items-center justify-center">
+          <img id="pair-qr" alt="Pair QR" width="320" height="320" />
+        </div>
+        <div class="mt-4 text-xs space-y-1">
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[var(--muted)]">Endpoint:</span>
+            <code id="pair-endpoint" class="mono text-[var(--sky)] break-all">—</code>
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[var(--muted)]">IP:</span>
+            <code id="pair-ip" class="mono text-[var(--sky-soft)]">—</code>
+          </div>
+        </div>
+        <div class="mt-4 text-xs text-[var(--muted)] border-t border-white/5 pt-3">
+          มือถือต้องอยู่ใน Wi-Fi วงเดียวกันกับ PC · ถ้า IP ผิด เช็คว่าคอมต่อ Ethernet/Wi-Fi อะไรอยู่
+        </div>
+      </div>
+    </div>
+
+    <footer class="text-xs text-[var(--muted)] text-center py-4">
+      อ่านจาก <span class="mono">data.jsonl</span> · update real-time ผ่าน SSE ·
+      <a href="https://notikeeper.vercel.app" target="_blank" class="text-[var(--sky)] hover:underline">notikeeper.vercel.app</a>
+    </footer>
+  </main>
+
+<script>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Server URL — empty = same origin (works with local server at localhost:8765)
+// Set via the ⚙️ button when accessing from outside the LAN.
+// ─────────────────────────────────────────────────────────────────────────────
+const SERVER_URL = (localStorage.getItem('nk_server') || '').replace(/\/+$/, '');
+
+// ── PIN Auth ──────────────────────────────────────────────────────────────────
+(function () {
+  const gate = document.getElementById('pin-gate');
+
+  // Build numpad
+  const pad = document.getElementById('pin-pad');
+  [1,2,3,4,5,6,7,8,9,'','0','⌫'].forEach(k => {
+    const btn = document.createElement('button');
+    btn.textContent = k;
+    btn.className = k === ''
+      ? 'py-3 invisible'
+      : 'py-3 rounded-xl font-semibold text-lg bg-white/5 hover:bg-white/10 active:bg-white/20 border border-white/10 transition';
+    btn.onclick = () => window.pinKey(String(k));
+    pad.appendChild(btn);
+  });
+
+  // Shake animation
+  const sty = document.createElement('style');
+  sty.textContent = '@keyframes pinShake{0%,100%{transform:none}20%,60%{transform:translateX(-6px)}40%,80%{transform:translateX(6px)}}';
+  document.head.appendChild(sty);
+
+  let pinBuf = '', setupFirst = null;
+
+  function sha256(str) {
+    return crypto.subtle.digest('SHA-256', new TextEncoder().encode(str))
+      .then(b => Array.from(new Uint8Array(b)).map(x => x.toString(16).padStart(2,'0')).join(''));
+  }
+
+  function updateDots() {
+    for (let i = 0; i < 4; i++) {
+      const d = document.getElementById('d' + i);
+      d.style.background = i < pinBuf.length ? '#5EC1FF' : '';
+    }
+  }
+
+  function shake() {
+    const dots = document.getElementById('pin-dots');
+    dots.style.animation = 'none'; dots.offsetHeight;
+    dots.style.animation = 'pinShake .4s ease';
+  }
+
+  async function pinKey(k) {
+    document.getElementById('pin-err').textContent = '';
+    if (k === '⌫') { pinBuf = pinBuf.slice(0, -1); updateDots(); return; }
+    if (pinBuf.length >= 4) return;
+    pinBuf += k;
+    updateDots();
+    if (pinBuf.length < 4) return;
+
+    const hash = await sha256(pinBuf);
+    const stored = localStorage.getItem('nk_pin_h');
+
+    if (!stored) {
+      // Setup mode
+      if (!setupFirst) {
+        setupFirst = hash;
+        document.getElementById('pin-title').textContent = 'ยืนยันรหัส';
+        document.getElementById('pin-sub').textContent   = 'ใส่รหัสอีกครั้ง';
+        pinBuf = ''; updateDots(); return;
+      }
+      if (hash === setupFirst) {
+        localStorage.setItem('nk_pin_h', hash);
+        sessionStorage.setItem('nk_ok', '1');
+        gate.style.display = 'none';
+      } else {
+        shake();
+        document.getElementById('pin-err').textContent = 'รหัสไม่ตรงกัน';
+        document.getElementById('pin-title').textContent = 'ตั้งรหัสผ่าน';
+        document.getElementById('pin-sub').textContent   = 'ใส่รหัส 4 หลัก';
+        setupFirst = null; pinBuf = ''; updateDots();
+      }
+    } else {
+      if (hash === stored) {
+        sessionStorage.setItem('nk_ok', '1');
+        gate.style.display = 'none';
+      } else {
+        shake();
+        document.getElementById('pin-err').textContent = 'รหัสผิด';
+        pinBuf = ''; updateDots();
+      }
+    }
+  }
+  window.pinKey = pinKey;
+
+  window.pinReset = () => {
+    if (confirm('ล้างรหัสและตั้งใหม่?')) {
+      localStorage.removeItem('nk_pin_h');
+      sessionStorage.removeItem('nk_ok');
+      location.reload();
+    }
+  };
+
+  window.openServerCfg = () => {
+    const m = document.getElementById('server-modal');
+    document.getElementById('server-input').value = localStorage.getItem('nk_server') || '';
+    m.style.display = 'flex';
+  };
+  window.closeServerCfg = () => {
+    document.getElementById('server-modal').style.display = 'none';
+  };
+  window.saveServerCfg = () => {
+    const val = document.getElementById('server-input').value.trim();
+    if (val) localStorage.setItem('nk_server', val);
+    else localStorage.removeItem('nk_server');
+    closeServerCfg();
+    location.reload();
+  };
+
+  // Already authed this session?
+  if (sessionStorage.getItem('nk_ok') === '1') {
+    gate.style.display = 'none'; return;
+  }
+  const stored = localStorage.getItem('nk_pin_h');
+  if (!stored) {
+    document.getElementById('pin-title').textContent = 'ตั้งรหัสผ่าน';
+    document.getElementById('pin-sub').textContent   = 'ใส่รหัส 4 หลักเพื่อเริ่มใช้งาน';
+  } else {
+    document.getElementById('pin-change-btn').classList.remove('hidden');
+  }
+})();
+
+// ─────────────────────────────────────────────────────────────────────────────
+const $ = (s) => document.querySelector(s);
+const rowsEl = $("#rows");
+const totalPill = $("#total-pill");
+const shownPill = $("#shown-pill");
+const statsGrid = $("#stats-grid");
+const appFilter = $("#app-filter");
+const liveDot = $("#live-dot");
+const liveLabel = $("#live-label");
+
+const fmtTime = (ms) => {
+  const d = new Date(ms);
+  const today = new Date();
+  const same = d.toDateString() === today.toDateString();
+  const t = d.toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit' });
+  return same ? t : d.toLocaleDateString('th-TH', { day:'2-digit', month:'short' }) + ' ' + t;
+};
+
+const escapeHtml = (s) => (s||'').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const highlight = (text, q) => {
+  if (!q) return escapeHtml(text);
+  const re = new RegExp(q.replace(/[-/\\^$*+?.()|[\]{}]/g,'\\$&'), 'gi');
+  return escapeHtml(text).replace(new RegExp(re.source, 'gi'), m => `<mark class="bg-[var(--gold)]/30 text-[var(--gold)] rounded px-0.5">${m}</mark>`);
+};
+
+const renderRow = (r, q='') => {
+  const tag = r.source === 'screen'
+    ? (r.side === 'me' ? 'หน้าจอ · ฉัน' : 'หน้าจอ · เขา')
+    : 'แจ้งเตือน';
+  const tagColor = r.source === 'screen'
+    ? 'bg-[var(--gold)]/15 text-[var(--gold)]'
+    : 'bg-[var(--sky)]/15 text-[var(--sky)]';
+  return `
+    <div class="row-enter px-4 py-3 hover:bg-white/[0.02]">
+      <div class="flex items-center justify-between text-xs mb-1">
+        <div class="flex items-center gap-2">
+          <span class="font-semibold text-white">${escapeHtml(r.app)}</span>
+          <span class="px-2 py-0.5 rounded-full text-[10px] ${tagColor}">${tag}</span>
+        </div>
+        <span class="text-[var(--muted)] mono">${fmtTime(r.time)}</span>
+      </div>
+      ${r.title ? `<div class="text-sm font-medium text-[var(--paper)]">${highlight(r.title, q)}</div>` : ''}
+      <div class="text-sm text-[var(--paper-2)] mt-0.5">${highlight(r.text, q)}</div>
+    </div>`;
+};
+
+const renderStats = (s) => {
+  const tile = (label, value, sub='') => `
+    <div class="bg-white/[0.03] border border-white/10 rounded-2xl p-4">
+      <div class="text-xs uppercase tracking-wider text-[var(--muted)]">${label}</div>
+      <div class="mt-1 text-2xl font-bold text-white">${value}</div>
+      ${sub ? `<div class="text-xs text-[var(--paper-2)] mt-1">${sub}</div>` : ''}
+    </div>`;
+  const topApp = Object.entries(s.byApp||{})[0];
+  const range = s.minTime && s.maxTime
+    ? `${new Date(s.minTime).toLocaleDateString('th-TH')} → ${new Date(s.maxTime).toLocaleDateString('th-TH')}`
+    : '—';
+  const noiseTopType = Object.entries(s.byNoise || {}).sort((a,b)=>b[1]-a[1])[0];
+  statsGrid.innerHTML = [
+    tile('ข้อความสะอาด', (s.cleanCount ?? s.total).toLocaleString(), `จาก ${s.total.toLocaleString()} รวม`),
+    tile('แอปบนสุด', topApp ? topApp[0] : '—', topApp ? `${topApp[1]} ข้อความ` : ''),
+    tile('แจ้งเตือน / หน้าจอ', `${(s.bySource?.noti||0)} / ${(s.bySource?.screen||0)}`),
+    tile('🧹 Noise ที่กรอง', (s.noiseCount || 0).toLocaleString(),
+        noiseTopType ? `ส่วนใหญ่: ${noiseTopType[0]} (${noiseTopType[1]})` : ''),
+  ].join('');
+  // Toolbar summary
+  if (typeof s.noiseCount === 'number') {
+    $("#noise-summary").textContent = `(พบ ${s.noiseCount.toLocaleString()} — กรองออกอัตโนมัติ)`;
+  }
+};
+
+let currentQuery = '';
+async function loadAll() {
+  currentQuery = $("#q").value.trim();
+  const params = new URLSearchParams();
+  if (currentQuery) params.set('q', currentQuery);
+  if (appFilter.value) params.set('app', appFilter.value);
+  if ($("#source-filter").value) params.set('source', $("#source-filter").value);
+  if ($("#denoise-toggle").checked) params.set('denoise', '1');
+  params.set('limit', '500');
+
+  const [msgRes, statRes] = await Promise.all([
+    fetch(SERVER_URL + '/api/messages?' + params),
+    fetch(SERVER_URL + '/api/stats'),
+  ]);
+  const msg = await msgRes.json();
+  const stat = await statRes.json();
+
+  // Populate app filter once we know the apps
+  const have = new Set(Array.from(appFilter.options).map(o => o.value));
+  for (const a of Object.keys(stat.byApp || {})) {
+    if (!have.has(a)) {
+      const opt = document.createElement('option');
+      opt.value = a; opt.textContent = `${a} (${stat.byApp[a]})`;
+      appFilter.append(opt);
+    }
+  }
+
+  totalPill.textContent = stat.total.toLocaleString();
+  shownPill.textContent = `แสดง ${msg.total.toLocaleString()} / ${msg.all.toLocaleString()}`;
+  renderStats(stat);
+  rowsEl.innerHTML = msg.rows.map(r => renderRow(r, currentQuery)).join('') || `
+    <div class="px-4 py-10 text-center text-[var(--muted)]">ไม่มีข้อความตรงเงื่อนไข</div>`;
+}
+
+// Wire UI
+$("#reload").addEventListener('click', loadAll);
+let debounce;
+$("#q").addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(loadAll, 200); });
+appFilter.addEventListener('change', loadAll);
+$("#source-filter").addEventListener('change', loadAll);
+$("#denoise-toggle").addEventListener('change', loadAll);
+
+// Claude quick prompts: copy to clipboard + try Claude Desktop deeplink
+document.querySelectorAll('.claude-quick').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const prompt = btn.dataset.claude;
+    try { await navigator.clipboard.writeText(prompt); } catch {}
+    const old = btn.innerHTML;
+    btn.innerHTML = '✓ ก๊อปแล้ว — วางใน Claude';
+    setTimeout(() => btn.innerHTML = old, 1800);
+  });
+});
+
+// SSE — push live updates when new ingest arrives
+function connectSSE() {
+  const es = new EventSource(SERVER_URL + '/events');
+  es.addEventListener('hello', () => {
+    liveDot.className = 'w-1.5 h-1.5 rounded-full bg-[var(--sky)] pulse-dot';
+    liveLabel.textContent = 'live';
+    liveLabel.className = 'text-[var(--sky)]';
+  });
+  es.addEventListener('new', () => loadAll());
+  es.onerror = () => {
+    liveDot.className = 'w-1.5 h-1.5 rounded-full bg-red-400';
+    liveLabel.textContent = 'reconnecting…';
+    liveLabel.className = 'text-red-400';
+    setTimeout(() => { es.close(); connectSSE(); }, 3000);
+  };
+}
+
+// Pair modal
+const pairModal = $("#pair-modal");
+async function openPairModal() {
+  const info = await (await fetch(SERVER_URL + '/api/pair')).json();
+  $("#pair-endpoint").textContent = info.endpoint;
+  $("#pair-ip").textContent = `${info.ip}:${info.port}`;
+  $("#pair-qr").src = SERVER_URL + '/api/pair-qr?t=' + Date.now();
+  pairModal.classList.remove('hidden');
+}
+$("#pair").addEventListener('click', openPairModal);
+$("#pair-header").addEventListener('click', openPairModal);
+$("#pair-close").addEventListener('click', () => pairModal.classList.add('hidden'));
+pairModal.addEventListener('click', (e) => { if (e.target === pairModal) pairModal.classList.add('hidden'); });
+
+// ===== Tabs =====
+const feedSections = ['#stats-grid', '#install-info', '#download'].map(s => $(s)).filter(Boolean);
+function setTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    const active = b.dataset.tab === name;
+    b.classList.toggle('bg-[var(--sky)]', active);
+    b.classList.toggle('text-[var(--ink)]', active);
+    b.classList.toggle('text-[var(--muted)]', !active);
+  });
+  document.querySelectorAll('main > section').forEach(s => {
+    if (s.id === 'threads-view') s.classList.toggle('hidden', name !== 'threads');
+    else s.classList.toggle('hidden', name === 'threads');
+  });
+  if (name === 'threads') loadThreads();
+}
+document.querySelectorAll('.tab-btn').forEach(b => {
+  b.addEventListener('click', () => setTab(b.dataset.tab));
+});
+setTab('feed');
+
+// ===== Threads tab =====
+async function loadThreads() {
+  const r = await (await fetch(SERVER_URL + '/api/threads?limit=300')).json();
+  $("#threads-count").textContent = `${r.count.toLocaleString()} threads`;
+  const fmtT = (ms) => new Date(ms).toLocaleString('th-TH', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+  $("#threads-list").innerHTML = r.threads.map(t => `
+    <div class="thread-row cursor-pointer px-4 py-3 hover:bg-white/[0.04]" data-id="${t.id}">
+      <div class="flex items-center justify-between text-xs">
+        <span class="px-2 py-0.5 rounded bg-[var(--sky)]/15 text-[var(--sky)] font-mono">${t.app}</span>
+        <span class="text-[var(--muted)] mono">${fmtT(t.last_msg)}</span>
+      </div>
+      <div class="font-semibold mt-1 line-clamp-1">${escapeHtml(t.name)}</div>
+      <div class="text-xs text-[var(--paper-2)] mt-1 line-clamp-1">${escapeHtml(t.last_text || '')}</div>
+      <div class="text-[10px] text-[var(--muted)] mt-1">${t.message_count} ข้อความ${t.is_group ? ' · group':''}</div>
+    </div>`).join('');
+  document.querySelectorAll('.thread-row').forEach(row => {
+    row.addEventListener('click', () => openThread(parseInt(row.dataset.id, 10)));
+  });
+}
+
+async function openThread(id) {
+  const t = await (await fetch(`${SERVER_URL}/api/threads/${id}?limit=500`)).json();
+  if (!t || t.error) return;
+  const parts = (t.participants || []).map(p => `<span class="px-2 py-0.5 rounded-full bg-white/5 text-xs">${escapeHtml(p.name)} · ${p.message_count}</span>`).join(' ');
+  $("#thread-header").innerHTML = `
+    <div class="flex items-center justify-between flex-wrap gap-2">
+      <div>
+        <div class="text-xs text-[var(--muted)] mono">${t.app} · #${t.id}${t.is_group?' · group':''}</div>
+        <div class="font-semibold text-lg mt-0.5">${escapeHtml(t.name)}</div>
+      </div>
+      <div class="text-xs text-[var(--muted)]">${t.message_count} ข้อความ</div>
+    </div>
+    <div class="mt-2 flex flex-wrap gap-1">${parts || '<span class="text-xs text-[var(--muted)]">no participants</span>'}</div>`;
+  const fmtT = (ms) => new Date(ms).toLocaleString('th-TH', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
+  $("#thread-body").innerHTML = t.messages.map(m => {
+    const me = m.side === 'me';
+    return `
+      <div class="flex ${me ? 'justify-end' : 'justify-start'}">
+        <div class="${me ? 'bg-[var(--sky)]/15' : 'bg-white/[0.04]'} max-w-[80%] rounded-2xl px-3 py-2">
+          ${m.sender && !me ? `<div class="text-[10px] font-semibold text-[var(--sky)]">${escapeHtml(m.sender)}</div>` : ''}
+          <div class="text-sm whitespace-pre-wrap">${escapeHtml(m.text)}</div>
+          <div class="text-[10px] text-[var(--muted)] mt-1 text-right mono">${fmtT(m.time)} · ${m.source}</div>
+        </div>
+      </div>`;
+  }).join('');
+  $("#thread-body").scrollTop = $("#thread-body").scrollHeight;
+}
+
+// ===== Tab switcher =====
+const tabBtns = document.querySelectorAll('.tab-btn');
+const feedView = document.querySelector('section#features, section#stats-grid') ? null : null;
+const VIEWS = {
+  feed:    ['#stats-grid', 'section.bg-white\\/\\[0.03\\]:has(input#q)', 'section.bg-white\\/\\[0.03\\]:has(#rows)'],
+  threads: ['#threads-view'],
+  graph:   ['#graph-view'],
+};
+function showTab(tab) {
+  tabBtns.forEach(b => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('bg-[var(--sky)]', on);
+    b.classList.toggle('text-[var(--ink)]', on);
+    b.classList.toggle('text-[var(--muted)]', !on);
+  });
+  document.querySelectorAll('section').forEach(el => el.classList.add('hidden'));
+  if (tab === 'feed') {
+    document.querySelectorAll('#stats-grid, main > section').forEach(el => {
+      if (!el.id || ['stats-grid'].includes(el.id) || el.querySelector('#q,#rows')) el.classList.remove('hidden');
+    });
+    // Hide threads/graph sections explicitly
+    document.querySelector('#threads-view')?.classList.add('hidden');
+    document.querySelector('#graph-view')?.classList.add('hidden');
+  } else if (tab === 'threads') {
+    document.querySelector('#threads-view')?.classList.remove('hidden');
+    if (!window.__threadsLoaded) { loadThreads(); window.__threadsLoaded = true; }
+  } else if (tab === 'graph') {
+    document.querySelector('#graph-view')?.classList.remove('hidden');
+    document.querySelector('#timeline-view')?.classList.add('hidden');
+    loadGraph();
+  } else if (tab === 'timeline') {
+    document.querySelector('#timeline-view')?.classList.remove('hidden');
+    if (!window.__tlLoaded) { loadTimeline(); window.__tlLoaded = true; }
+  } else if (tab === 'chat') {
+    document.querySelector('#chat-view')?.classList.remove('hidden');
+    if (!window.__chatLoaded) { loadChatList(); window.__chatLoaded = true; }
+  }
+}
+tabBtns.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+// ===== Threads tab =====
+async function loadThreads() {
+  const list = document.querySelector('#threads-list');
+  const data = await (await fetch(SERVER_URL + '/api/threads?limit=200')).json();
+  document.querySelector('#threads-count').textContent = `${data.count} ห้อง`;
+  list.innerHTML = data.threads.map(t => `
+    <div class="px-4 py-3 cursor-pointer hover:bg-white/[0.04]" data-thread="${t.id}">
+      <div class="flex items-center justify-between text-xs">
+        <span class="font-semibold text-white">${t.app}</span>
+        <span class="text-[var(--muted)] mono">${t.message_count} msg</span>
+      </div>
+      <div class="mt-0.5 text-sm font-medium">${escapeHtml(t.name)}</div>
+      <div class="mt-0.5 text-xs text-[var(--paper-2)] line-clamp-1 opacity-70">${escapeHtml((t.last_text||'').slice(0,80))}</div>
+    </div>`).join('');
+  list.querySelectorAll('[data-thread]').forEach(el => {
+    el.addEventListener('click', () => openThread(parseInt(el.dataset.thread, 10)));
+  });
+}
+async function openThread(id) {
+  const t = await (await fetch(`${SERVER_URL}/api/threads/${id}?limit=300`)).json();
+  document.querySelector('#thread-header').innerHTML = `
+    <h2 class="font-semibold">${escapeHtml(t.name)}</h2>
+    <div class="text-xs text-[var(--muted)] mt-0.5">${t.app} · ${t.message_count} msg · ${t.participants.map(p=>escapeHtml(p.name)).join(', ')||'—'}</div>`;
+  document.querySelector('#thread-body').innerHTML = t.messages.map(m => {
+    const me = m.side === 'me';
+    return `<div class="flex ${me ? 'justify-end' : 'justify-start'}">
+      <div class="max-w-[80%] rounded-2xl px-3 py-2 ${me ? 'bg-[var(--sky)]/20 border border-[var(--sky)]/30' : 'bg-white/5 border border-white/10'}">
+        <div class="text-[10px] text-[var(--muted)] mb-0.5">${m.sender || (me?'me':'?')} · ${fmtTime(m.time)}</div>
+        <div class="text-sm">${escapeHtml(m.text)}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ===== Graph tab =====
+let network = null;
+async function loadGraph(focus) {
+  const app = document.querySelector('#graph-app').value;
+  const showMsgs = document.querySelector('#graph-show-msgs').checked;
+  const params = new URLSearchParams();
+  if (focus) params.set('focus', focus);
+  else if (app) params.set('app', app);
+  if (showMsgs) params.set('messages', '1');
+
+  const data = await (await fetch(SERVER_URL + '/api/graph/view?' + params)).json();
+  document.querySelector('#graph-count').textContent = `${data.counts?.nodes||0} nodes · ${data.counts?.edges||0} edges`;
+
+  // Populate app dropdown once
+  if (document.querySelector('#graph-app').options.length <= 1) {
+    const stats = await (await fetch(SERVER_URL + '/api/relations')).json();
+    for (const a of stats.apps) {
+      const opt = document.createElement('option');
+      opt.value = a.name; opt.textContent = `${a.name} (${a.thread_count})`;
+      document.querySelector('#graph-app').append(opt);
+    }
+  }
+
+  const container = document.querySelector('#graph-canvas');
+  if (network) network.destroy();
+  network = new vis.Network(container, {
+    nodes: new vis.DataSet(data.nodes),
+    edges: new vis.DataSet(data.edges),
+  }, {
+    physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -55, springLength: 95 }, stabilization: { iterations: 200 } },
+    interaction: { hover: true, tooltipDelay: 120 },
+    edges: { smooth: { type: 'continuous' }, font: { color: '#8FA4BC', size: 9, strokeWidth: 0 }, arrows: { to: { scaleFactor: 0.5 } } },
+    nodes: { borderWidth: 1.5, font: { color: '#E6EEF8', size: 13, strokeWidth: 2, strokeColor: '#0B1322' } },
+  });
+  network.on('doubleClick', (params) => {
+    if (params.nodes.length) {
+      const id = params.nodes[0];
+      if (id.startsWith('thread:') || id.startsWith('app:')) loadGraph(id);
+    }
+  });
+}
+document.querySelector('#graph-app').addEventListener('change', () => loadGraph());
+document.querySelector('#graph-show-msgs').addEventListener('change', () => loadGraph());
+document.querySelector('#graph-reset').addEventListener('click', () => {
+  document.querySelector('#graph-app').value = '';
+  document.querySelector('#graph-show-msgs').checked = false;
+  loadGraph();
+});
+
+// ===== Timeline tab =====
+function countToColor(n) {
+  if (n === 0)   return 'rgba(255,255,255,0.05)';
+  if (n < 5)     return 'rgba(94,193,255,0.20)';
+  if (n < 15)    return 'rgba(94,193,255,0.45)';
+  if (n < 40)    return 'rgba(94,193,255,0.75)';
+  return 'rgba(94,193,255,1)';
+}
+
+function renderHeatmap(days) {
+  const wrap = document.querySelector('#heatmap-wrap');
+  if (!days.length) {
+    wrap.innerHTML = '<div class="text-[var(--muted)] text-sm py-4">ยังไม่มีข้อมูล — รัน scraper หรือ import จาก Facebook ก่อน</div>';
+    return;
+  }
+
+  const map = new Map(days.map(d => [d.date, d]));
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+
+  // Align to Sunday of first week
+  const firstDate = new Date(days[0].date + 'T00:00:00');
+  const start = new Date(firstDate);
+  start.setDate(start.getDate() - start.getDay()); // back to Sunday
+
+  const CELL = 11, GAP = 2;
+  const DAY_LABELS = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+  const outer = document.createElement('div');
+  outer.className = 'flex gap-0.5';
+
+  // Day-of-week labels column
+  const lblCol = document.createElement('div');
+  lblCol.className = 'flex flex-col flex-none text-[10px] text-[var(--muted)] mr-1';
+  lblCol.style.paddingTop = '22px';
+  DAY_LABELS.forEach(l => {
+    const el = document.createElement('div');
+    el.style.cssText = `height:${CELL}px;line-height:${CELL}px;margin-bottom:${GAP}px`;
+    el.textContent = l;
+    lblCol.append(el);
+  });
+  outer.append(lblCol);
+
+  // Week columns
+  let cur = new Date(start);
+  let lastMonth = -1;
+
+  while (cur <= today) {
+    const col = document.createElement('div');
+    col.className = 'flex flex-col';
+    col.style.gap = GAP + 'px';
+
+    // Month label (show only when month changes)
+    const monthEl = document.createElement('div');
+    monthEl.style.cssText = `height:20px;line-height:20px;font-size:10px;white-space:nowrap;color:var(--muted)`;
+    const m = cur.getMonth();
+    if (m !== lastMonth) {
+      monthEl.textContent = cur.toLocaleDateString('th-TH', { month: 'short', year: 'numeric' })
+        .replace(' ', ' '); // non-breaking space keeps month+year together
+      lastMonth = m;
+    }
+    col.append(monthEl);
+
+    // 7 day cells (Sun–Sat)
+    for (let dow = 0; dow < 7; dow++) {
+      const day = new Date(cur);
+      day.setDate(cur.getDate() + dow);
+
+      const cell = document.createElement('div');
+      cell.style.cssText = `width:${CELL}px;height:${CELL}px;border-radius:2px;flex-shrink:0`;
+
+      if (day > today) {
+        cell.style.background = 'transparent';
+      } else {
+        const ds    = day.toISOString().slice(0, 10);
+        const info  = map.get(ds);
+        const count = info?.count || 0;
+        cell.style.background = countToColor(count);
+        cell.title = `${ds}: ${count} ข้อความ${info?.topApp ? '\n' + info.topApp : ''}`;
+        if (count > 0) {
+          cell.style.cursor = 'pointer';
+          cell.addEventListener('click', () => showDayDetail(ds));
+        }
+      }
+      col.append(cell);
+    }
+
+    outer.append(col);
+    cur.setDate(cur.getDate() + 7);
+  }
+
+  wrap.innerHTML = '';
+  wrap.append(outer);
+}
+
+async function loadTimeline() {
+  const app     = document.querySelector('#tl-app')?.value || '';
+  const denoise = document.querySelector('#tl-denoise')?.checked ? '1' : '0';
+  const params  = new URLSearchParams({ denoise });
+  if (app) params.set('app', app);
+
+  const data = await (await fetch(SERVER_URL + '/api/timeline?' + params)).json();
+  document.querySelector('#tl-total').textContent =
+    `${data.total.toLocaleString()} ข้อความ · ${data.days.length.toLocaleString()} วัน`;
+
+  // Populate app dropdown once
+  const tlApp = document.querySelector('#tl-app');
+  if (tlApp && tlApp.options.length <= 1) {
+    const stats = await (await fetch(SERVER_URL + '/api/stats')).json();
+    for (const a of Object.keys(stats.byApp || {})) {
+      const opt = document.createElement('option');
+      opt.value = a;
+      opt.textContent = `${a} (${stats.byApp[a]})`;
+      tlApp.append(opt);
+    }
+  }
+
+  renderHeatmap(data.days);
+}
+
+async function showDayDetail(dateStr) {
+  const detail = document.querySelector('#tl-day-detail');
+  const title  = document.querySelector('#tl-day-title');
+  const msgs   = document.querySelector('#tl-day-msgs');
+
+  const d = new Date(dateStr + 'T00:00:00');
+  title.textContent = d.toLocaleDateString('th-TH', {
+    weekday: 'long', day: 'numeric', month: 'long', year: 'numeric'
+  });
+  detail.classList.remove('hidden');
+  msgs.innerHTML = '<div class="text-[var(--muted)] text-sm animate-pulse">กำลังโหลด…</div>';
+
+  const since = d.getTime();
+  const until = since + 86400000;
+  const app     = document.querySelector('#tl-app')?.value || '';
+  const denoise = document.querySelector('#tl-denoise')?.checked ? '1' : '0';
+  const params  = new URLSearchParams({ since, until, limit: 500, denoise });
+  if (app) params.set('app', app);
+
+  const res     = await (await fetch(SERVER_URL + '/api/messages?' + params)).json();
+  const dayMsgs = res.rows.slice().sort((a, b) => a.time - b.time);
+
+  if (!dayMsgs.length) {
+    msgs.innerHTML = '<div class="text-[var(--muted)] text-sm">ไม่มีข้อความในวันนี้</div>';
+    return;
+  }
+
+  msgs.innerHTML = dayMsgs.map(r => {
+    const me  = r.side === 'me';
+    const t   = new Date(r.time).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+    const who = me ? 'me' : (r.title || r.app || '?');
+    return `<div class="flex ${me ? 'justify-end' : 'justify-start'}">
+      <div class="max-w-[82%] rounded-2xl px-3 py-2 ${me
+        ? 'bg-[var(--sky)]/15 border border-[var(--sky)]/20'
+        : 'bg-white/[0.04] border border-white/10'}">
+        <div class="text-[10px] text-[var(--muted)] mb-0.5 flex gap-2 flex-wrap">
+          <span class="font-semibold">${escapeHtml(r.app)}${r.title ? ' · ' + escapeHtml(r.title) : ''}</span>
+          <span class="mono">${t}</span>
+        </div>
+        <div class="text-sm whitespace-pre-wrap break-words">${escapeHtml(r.text)}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+document.querySelector('#tl-reload')?.addEventListener('click', () => {
+  window.__tlLoaded = false; // force reload
+  loadTimeline();
+  window.__tlLoaded = true;
+});
+document.querySelector('#tl-app')?.addEventListener('change', () => {
+  loadTimeline();
+  window.__tlLoaded = true;
+});
+document.querySelector('#tl-denoise')?.addEventListener('change', () => {
+  loadTimeline();
+  window.__tlLoaded = true;
+});
+document.querySelector('#tl-day-close')?.addEventListener('click', () => {
+  document.querySelector('#tl-day-detail')?.classList.add('hidden');
+});
+
+loadAll();
+connectSSE();
+showTab('feed');
+
+// ===== Chat log tab =====
+async function loadChatList() {
+  const list = document.querySelector('#chat-list');
+  list.innerHTML = '<div class="p-4 text-sm text-[var(--muted)]">กำลังโหลด…</div>';
+  try {
+    const threads = await (await fetch(SERVER_URL + '/api/chatlog')).json();
+    if (!threads.length) {
+      list.innerHTML = '<div class="p-4 text-sm text-[var(--muted)]">ไม่พบ chat log<br><span class="text-xs">กด 🔄 เพื่อ rebuild ก่อน</span></div>';
+      return;
+    }
+    list.innerHTML = threads.map(t => {
+      const d = new Date(t.to).toLocaleDateString('th-TH', { day:'numeric', month:'short' });
+      return `<div class="chat-item px-4 py-3 cursor-pointer hover:bg-white/[0.05] transition" data-slug="${escapeHtml(t.slug)}">
+        <div class="flex items-center justify-between">
+          <span class="font-semibold text-sm">${escapeHtml(t.title)}</span>
+          <span class="text-xs text-[var(--muted)] mono">${t.count}</span>
+        </div>
+        <div class="text-xs text-[var(--muted)] mt-0.5">${d}</div>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.chat-item').forEach(el =>
+      el.addEventListener('click', () => openChat(el.dataset.slug, el))
+    );
+  } catch (e) {
+    list.innerHTML = `<div class="p-4 text-sm text-red-400">โหลดไม่ได้: ${e.message}</div>`;
+  }
+}
+
+async function openChat(slug, clickedEl) {
+  // Highlight selected
+  document.querySelectorAll('.chat-item').forEach(el =>
+    el.classList.toggle('bg-[var(--sky)]/10', el === clickedEl)
+  );
+
+  const header = document.querySelector('#chat-panel-header');
+  const body   = document.querySelector('#chat-panel-body');
+  header.innerHTML = '<span class="text-[var(--muted)] text-sm">กำลังโหลด…</span>';
+  body.innerHTML   = '';
+
+  try {
+    const d = await (await fetch(`${SERVER_URL}/api/chatlog/${encodeURIComponent(slug)}`)).json();
+
+    header.innerHTML = `
+      <div class="min-w-0">
+        <div class="font-semibold truncate">${escapeHtml(d.title)}</div>
+        <div class="text-xs text-[var(--muted)] mt-0.5">${d.count} ข้อความ · ${
+          new Date(d.from).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})
+        } → ${
+          new Date(d.to).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})
+        }</div>
+      </div>`;
+
+    // Group by day
+    const days = new Map();
+    for (const m of d.messages) {
+      const day = new Date(m.time).toLocaleDateString('th-TH', {
+        weekday:'long', year:'numeric', month:'long', day:'numeric'
+      });
+      if (!days.has(day)) days.set(day, []);
+      days.get(day).push(m);
+    }
+
+    const html = [];
+    for (const [day, msgs] of days) {
+      html.push(`<div class="flex items-center gap-2 my-3">
+        <div class="flex-1 h-px bg-white/10"></div>
+        <span class="text-xs text-[var(--muted)] whitespace-nowrap">${day}</span>
+        <div class="flex-1 h-px bg-white/10"></div>
+      </div>`);
+      for (const m of msgs) {
+        const isMe = m.side === 'me';
+        const time = new Date(m.time).toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit' });
+        const name = isMe ? 'ฉัน' : (m.sender || 'เขา');
+        html.push(`<div class="flex ${isMe ? 'justify-end' : 'justify-start'} gap-2 items-end">
+          <div class="max-w-[75%] ${isMe
+            ? 'bg-[var(--sky)]/20 rounded-2xl rounded-br-sm'
+            : 'bg-white/[0.06] rounded-2xl rounded-bl-sm'
+          } px-3 py-2">
+            ${!isMe ? `<div class="text-[10px] font-semibold text-[var(--sky)] mb-1">${escapeHtml(name)}</div>` : ''}
+            <div class="text-sm leading-relaxed break-words">${escapeHtml(m.text)}</div>
+            <div class="text-[10px] text-[var(--muted)] mt-1 ${isMe ? 'text-right' : ''}">${time}</div>
+          </div>
+        </div>`);
+      }
+    }
+    body.innerHTML = html.join('');
+    // Scroll to bottom
+    body.scrollTop = body.scrollHeight;
+  } catch (e) {
+    header.innerHTML = `<span class="text-red-400 text-sm">โหลดไม่ได้: ${e.message}</span>`;
+  }
+}
+
+document.querySelector('#chat-rebuild')?.addEventListener('click', async () => {
+  const btn = document.querySelector('#chat-rebuild');
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    await fetch(SERVER_URL + '/api/chatlog/rebuild', { method: 'POST' });
+    // Wait a moment then reload list
+    setTimeout(async () => {
+      window.__chatLoaded = false;
+      await loadChatList();
+      window.__chatLoaded = true;
+      btn.textContent = '🔄';
+      btn.disabled = false;
+    }, 3000);
+  } catch {
+    btn.textContent = '🔄';
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
