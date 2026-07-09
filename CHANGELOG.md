@@ -13,6 +13,18 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.1.5] — 2026-07-09
+### Fixed
+- **On-device notification dedup keyed on time**: `NotiStore.insertNoti`
+  built its UNIQUE dedup key as `noti:$title:$text:$postTime`, so a
+  spam/promo channel reposting identical text with a fresh timestamp
+  produced a new key each time and got stored as a separate row — the PC
+  cleanup couldn't reach back to delete these on-device. Key is now
+  `noti:$pkg:$title:$text` (content identity only), matching the PC
+  server's exact-match semantics so phone and PC stay consistent. Applies
+  to notifications arriving after the update; already-stored duplicates
+  remain. See `docs/rca/2026-07-09-phone-noti-dedup-includes-time.md`.
+
 ## [1.1.4] — 2026-07-09
 ### Changed
 - `versionName` now follows standard `x.y.z` SemVer (was `x.y`, e.g. `1.13`).

@@ -72,7 +72,13 @@ class NotiStore private constructor(
             put("text", text)
             put("side", "")
             put("postTime", postTime)
-            put("dedupKey", "noti:$title:$text:$postTime")
+            // Dedup on content, NOT time: spam/promo channels repost identical text
+            // with a fresh timestamp each time, so including postTime here made every
+            // repost a "new" row. Keying on (pkg, title, text) collapses those to one
+            // — same exact-match semantics the PC server uses. Trade-off: a genuinely
+            // repeated short message ("ครับ") is also kept once, which the PC store
+            // already does anyway, so phone and PC stay consistent.
+            put("dedupKey", "noti:$pkg:$title:$text")
         }
         database.insertWithOnConflict(
             "notifications", null, values, SQLiteDatabase.CONFLICT_IGNORE

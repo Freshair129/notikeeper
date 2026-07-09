@@ -2,7 +2,7 @@
   "registry_version": "1.0.0",
   "items": [
     { "id": "DOC-0001", "path": "ARCHITECTURE.md", "version": "0.1.0", "status": "draft" },
-    { "id": "DOC-0002", "path": "CHANGELOG.md", "version": "0.3.0", "status": "draft" },
+    { "id": "DOC-0002", "path": "CHANGELOG.md", "version": "0.4.0", "status": "draft" },
     { "id": "DOC-0003", "path": "CLAUDE.md", "version": "0.1.0", "status": "draft" },
     { "id": "DOC-0004", "path": "RELEASE.md", "version": "0.1.0", "status": "draft" },
     { "id": "DOC-0005", "path": "SECURITY.md", "version": "0.1.0", "status": "draft" }
