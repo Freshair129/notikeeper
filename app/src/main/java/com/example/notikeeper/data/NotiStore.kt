@@ -154,6 +154,25 @@ class NotiStore private constructor(
         return result
     }
 
+    /**
+     * Phase 2 of docs/ARCHITECTURE_CHANGE_REQUEST.md: deletes rows the PC has
+     * durably acked (id <= [throughId]) AND that are older than
+     * [retentionFloorMs] — the retention floor is kept regardless of ack
+     * status, so a recent row is never pruned even seconds after the PC
+     * confirms it, giving a safety margin against ack/prune bugs. Never
+     * deletes anything the PC hasn't confirmed receiving. Returns the number
+     * of rows deleted.
+     */
+    fun pruneAcked(throughId: Long, retentionFloorMs: Long): Int {
+        if (throughId <= 0) return 0
+        val cutoff = System.currentTimeMillis() - retentionFloorMs
+        return database.delete(
+            "notifications",
+            "id <= ? AND postTime < ?",
+            arrayOf(throughId.toString(), cutoff.toString())
+        )
+    }
+
     /** Rows with id greater than [afterId], oldest first. Pass -1 for everything (export). */
     fun querySince(afterId: Long): List<NotiItem> {
         val cursor = database.rawQuery(

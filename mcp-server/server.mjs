@@ -304,7 +304,16 @@ const httpServer = http.createServer((req, res) => {
         // batch is fsync'd to data.jsonl inside ingest() above, before this
         // response goes out, so acking the batch's max id is durable — safe for
         // the phone to treat as a prune floor. Falls back to the server's overall
-        // max id when the batch had none (e.g. all rows were malformed).
+        // max id when the batch had none (e.g. all rows were malformed, or the
+        // batch was empty). `rows` is a single shared store with no per-device
+        // partition, so this fallback is only correct under the single-device
+        // deployment model this app is built for (see CLAUDE.md: "Personal-use
+        // tool for the device owner's own data"). If this ever becomes a
+        // multi-device tool, `rows`/ackedThroughId must be scoped per device
+        // before Phase 2 prune (NotiStore.pruneAcked) can keep trusting it —
+        // otherwise one device's ack could wrongly authorize pruning another
+        // device's un-acked local rows, since local row ids are independent
+        // per-install SQLite autoincrement counters, not a global sequence.
         const ackedThroughId = maxId(batch) ?? maxId(rows) ?? 0;
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, received: n, total: rows.length, ackedThroughId }));

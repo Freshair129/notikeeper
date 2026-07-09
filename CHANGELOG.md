@@ -13,6 +13,20 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.2.0] — 2026-07-09
+### Added
+- **Phase 2 of PC-as-SSOT (`docs/ARCHITECTURE_CHANGE_REQUEST.md`): on-device
+  prune.** `NotiStore.pruneAcked` deletes rows the PC has durably acked
+  (`id <= prunableThroughId`) AND that are older than a 7-day retention
+  floor — a row is never pruned younger than that even if acked, as a
+  safety margin against ack/prune bugs. Wired to run automatically right
+  after a successful upload, in both the auto-upload effect and the manual
+  "อัปโหลดตอนนี้" button. **Off by default** — a new kill switch
+  (`Settings.getPruneEnabled`) gates it; the owner turns it on explicitly
+  from the Device & Connection screen once they trust the ack protocol on
+  their own data. Raw is never lost even when pruned: the PC (`data.jsonl`)
+  keeps the full append-only archive regardless.
+
 ## [1.1.5] — 2026-07-09
 ### Fixed
 - **On-device notification dedup keyed on time**: `NotiStore.insertNoti`

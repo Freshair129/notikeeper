@@ -424,7 +424,14 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     )
                     Settings.setLastUploadedId(ctx, fresh.maxOf { it.id })
                     Settings.setLastSyncTime(ctx, System.currentTimeMillis())
-                    if (result.ackedThroughId > 0) Settings.setPrunableThroughId(ctx, result.ackedThroughId)
+                    if (result.ackedThroughId > 0) {
+                        Settings.setPrunableThroughId(ctx, result.ackedThroughId)
+                        if (Settings.getPruneEnabled(ctx)) {
+                            withContext(Dispatchers.IO) {
+                                NotiStore.get(ctx).pruneAcked(Settings.getPrunableThroughId(ctx), Settings.PRUNE_RETENTION_MS)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -856,6 +863,7 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
     var deviceName by remember { mutableStateOf(Settings.getDeviceName(ctx).ifBlank { Build.MODEL }) }
     var apiUrl by remember { mutableStateOf(Settings.getApiUrl(ctx)) }
     var apiToken by remember { mutableStateOf(Settings.getApiToken(ctx)) }
+    var pruneEnabled by remember { mutableStateOf(Settings.getPruneEnabled(ctx)) }
     var auto by remember { mutableStateOf(Settings.getAutoUpload(ctx)) }
     var lastSync by remember { mutableStateOf(Settings.getLastSyncTime(ctx)) }
     var status by remember { mutableStateOf("") }
@@ -1015,6 +1023,21 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
                 Text("อัปโหลดอัตโนมัติเมื่อเปิดแอป (เฉพาะรายการใหม่)")
             }
             Spacer(Modifier.height(10.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Switch(
+                    checked = pruneEnabled,
+                    onCheckedChange = { pruneEnabled = it; Settings.setPruneEnabled(ctx, it) }
+                )
+                Spacer(Modifier.width(8.dp))
+                Column {
+                    Text("ลบข้อมูลบนเครื่องหลังซิงค์ขึ้น PC แล้ว")
+                    Text(
+                        "ลบเฉพาะรายการที่ PC ยืนยันรับแล้วและเก่ากว่า 7 วัน — ข้อมูลบน PC ไม่หายไปไหน",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
             Button(
                 onClick = {
                     scope.launch {
@@ -1026,7 +1049,14 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
                             val uploaded = Exporter.uploadJson(apiUrl, apiToken, Exporter.itemsToJson(fresh), deviceName)
                             Settings.setLastUploadedId(ctx, fresh.maxOf { it.id })
                             Settings.setLastSyncTime(ctx, System.currentTimeMillis())
-                            if (uploaded.ackedThroughId > 0) Settings.setPrunableThroughId(ctx, uploaded.ackedThroughId)
+                            if (uploaded.ackedThroughId > 0) {
+                                Settings.setPrunableThroughId(ctx, uploaded.ackedThroughId)
+                                if (Settings.getPruneEnabled(ctx)) {
+                                    withContext(Dispatchers.IO) {
+                                        NotiStore.get(ctx).pruneAcked(Settings.getPrunableThroughId(ctx), Settings.PRUNE_RETENTION_MS)
+                                    }
+                                }
+                            }
                             lastSync = Settings.getLastSyncTime(ctx)
                             uploaded.code
                         }

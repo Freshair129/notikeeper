@@ -64,13 +64,25 @@ object Settings {
 
     /**
      * Server-confirmed high-water mark: the max row id the PC has durably
-     * stored (from `/ingest`'s `ackedThroughId`). Prep for a future prune
-     * (see docs/ARCHITECTURE_CHANGE_REQUEST.md phase 2) — not used for
-     * deletion yet. Never allowed to move backwards.
+     * stored (from `/ingest`'s `ackedThroughId`). Feeds Phase 2 pruning
+     * (see docs/ARCHITECTURE_CHANGE_REQUEST.md phase 2). Never allowed to
+     * move backwards.
      */
     fun getPrunableThroughId(c: Context): Long = prefs(c).getLong("prunable_through_id", 0L)
     fun setPrunableThroughId(c: Context, v: Long) =
         prefs(c).edit().putLong("prunable_through_id", maxOf(v, getPrunableThroughId(c))).apply()
+
+    /**
+     * Phase 2 kill switch: pruning only ever runs when the owner explicitly
+     * turns it on. Defaults to off so a fresh install/update never starts
+     * deleting on-device data until the owner has confirmed the ack protocol
+     * behaves correctly on their own data.
+     */
+    fun getPruneEnabled(c: Context): Boolean = prefs(c).getBoolean("prune_enabled", false)
+    fun setPruneEnabled(c: Context, v: Boolean) = prefs(c).edit().putBoolean("prune_enabled", v).apply()
+
+    /** Retention floor: never prune a row younger than this, even if acked. */
+    const val PRUNE_RETENTION_MS = 7L * 24 * 3600_000L
 
     /** Epoch millis of the last successful upload — shown on the Device & Connection screen. */
     fun getLastSyncTime(c: Context): Long = prefs(c).getLong("last_sync_time", 0L)
