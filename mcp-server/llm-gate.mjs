@@ -104,12 +104,18 @@ async function ollamaUp() {
 // combo is Qwen3's `/no_think` soft-switch (emits an empty <think> block then
 // the answer), no format constraint, and stripping the <think> prefix before
 // parsing. See the probe results recorded during implementation.
+// Names are the trap: without the explicit "sender/contact/brand/app names =
+// chrome" rule, the model rescues bare names (Korn, Netflix, a clinic name) as
+// "messages" and pollutes the store. With it, tested 8/10 on hard cases: names
+// and brands -> chrome, real one-word replies (ครับ / ได้เลย / Ok ka) -> message.
 const SYSTEM_PROMPT =
-  "You classify ONE UI-captured text line as either a real chat message a human " +
-  "typed and sent, or app/interface chrome (buttons, labels, timestamps, status " +
-  "like 'seen'/'delivered', navigation, menu items, app names). " +
-  "ตอบเป็น JSON เท่านั้น ไม่ต้องอธิบาย: {\"isMessage\": true} ถ้าเป็นข้อความแชตจริงที่คนพิมพ์, " +
-  "{\"isMessage\": false} ถ้าเป็นปุ่ม/ป้าย/ส่วนติดต่อผู้ใช้ของแอป. /no_think";
+  "คุณจำแนกข้อความ 1 บรรทัดที่ดักจับจากหน้าจอแอปแชต ว่าเป็น (ก) ข้อความแชตจริงที่คนพิมพ์ส่ง " +
+  "หรือ (ข) ส่วนติดต่อผู้ใช้/ป้ายกำกับ. " +
+  "สำคัญ: ชื่อคน ชื่อผู้ส่ง ชื่อผู้ติดต่อ ชื่อร้าน/คลินิก/แบรนด์/แอป = (ข) ไม่ใช่ข้อความ. " +
+  "ปุ่ม ป้าย เวลา สถานะ(seen/delivered) เมนู นำทาง = (ข). " +
+  "เฉพาะประโยคหรือคำพูดที่คนพิมพ์คุยกันจริง = (ก). " +
+  "ตอบ JSON เท่านั้น ไม่ต้องอธิบาย: {\"isMessage\": true} ถ้าเป็น(ก), " +
+  "{\"isMessage\": false} ถ้าเป็น(ข). /no_think";
 
 /** Pull the {"isMessage": bool} object out of a response that may be wrapped in
  *  a <think> block or stray prose. Returns true/false, or null if not found. */
@@ -216,7 +222,10 @@ export async function runGate({ limit = Infinity, dry = false } = {}) {
     if (classified >= limit) break;
     const verdict = await classify(row.app, row.title, row.text);
     if (verdict === null) { failed++; continue; }         // don't cache failures — retry next run
-    if (!dry) store[h] = { isMessage: verdict, text: row.text.slice(0, 80) };
+    if (!dry) {
+      store[h] = { isMessage: verdict, text: row.text.slice(0, 80) };
+      if (classified % 100 === 0) saveCache(store);        // checkpoint — a long run must survive interruption
+    }
     classified++;
     if (!verdict) notMessage++;
   }
