@@ -1,8 +1,9 @@
 # ARCHITECTURE_CHANGE_REQUEST — PC-as-SSOT with raw-authoritative sync
 
-**Status:** PROPOSED — awaiting owner approval. No implementation until approved (RWANG:MasterPlan §11.2).
+**Status:** APPROVED by owner (Boss) 2026-07-09. Implementation proceeding — non-destructive phases (1, 3, 4) first; Phase 2 (prune) deferred pending phase-1 hardening.
 **Date:** 2026-07-09
 **Requested by:** Boss (owner) · drafted by claude-code
+**Local LLM for the Phase 4 quality-gate (owner decision):** `hf.co/iapp/chinda-qwen3-4b-gguf:Q4_K_M` (Thai-tuned Qwen3-4B, Q4_K_M) served via Ollama chat API. ~2.5GB; owner pulls it. Gate degrades gracefully if the model is absent.
 
 ---
 
@@ -105,8 +106,10 @@ Key rules:
 3. **PC clean-view read model + pull.** Phone can optionally pull the cleaned
    view for display; local feed switches from phone-parse to PC-view when online.
 4. **LLM quality-gate.** Add the local-LLM ambiguity classifier to the PC parse
-   path; gate embeddings behind it. (Model choice, latency budget, and cost are
-   their own sub-decision.)
+   path; gate embeddings behind it. Model chosen:
+   `hf.co/iapp/chinda-qwen3-4b-gguf:Q4_K_M` via Ollama chat API. Verdicts are
+   cached per `sha256(pkg|title|text)` so each unique line is classified once
+   and the pipeline stays deterministic given the cache.
 
 ## Risks
 
