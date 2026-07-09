@@ -66,6 +66,30 @@
       "ready": true,
       "created_at": "2026-07-09T10:52:00+07:00",
       "updated_at": "2026-07-09T11:09:32+07:00"
+    },
+    {
+      "id": "TASK-0004",
+      "title": "Fix QR pairing scan re-lock loop; ship v1.13 release",
+      "category": "Core",
+      "status": "completed",
+      "dependencies": [],
+      "required_capability": ["Implementation", "Security"],
+      "complexity": "M",
+      "estimated_context": "Medium",
+      "local_eligibility": "CLOUD_REQUIRED",
+      "parallelizable": false,
+      "verification": ["Compiler", "Manual"],
+      "priority": 1,
+      "produced_outputs": [
+        "app/src/main/java/com/example/notikeeper/MainActivity.kt",
+        "app/build.gradle.kts",
+        "release/version.json",
+        "CHANGELOG.md",
+        "docs/rca/2026-07-09-qr-scan-relock-loop.md"
+      ],
+      "ready": true,
+      "created_at": "2026-07-09T11:12:00+07:00",
+      "updated_at": "2026-07-09T11:30:15+07:00"
     }
   ]
 }
