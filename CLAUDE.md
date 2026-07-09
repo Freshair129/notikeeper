@@ -84,9 +84,16 @@ data.jsonl  (append-only raw, the app POSTs here via /ingest)
   → relations.mjs  ETL → SQLite (relations.db): Messenger-style schema,
                    aggressive chrome-label noise filter
   → graph-index.mjs mirror → GenesisBlock (graph.db): nodes/edges + HQL,
-                   + BGE-M3 1024d vectors (collection "messages", cosine HNSW)
+                   + BGE-M3 1024d vectors (collection "turns", cosine HNSW)
                    via local Ollama `bge-m3` (~190ms/embed)
 ```
+- **Embedding unit = conversational *turn*, not raw message** (`buildTurns` in
+  graph-index.mjs). Only `scrape`-source rows are embedded (clean dialogue);
+  `screen` (inbox chrome) and `noti` (app spam) are dropped. Consecutive
+  same-sender fragments within 5 min merge into one turn — fixes the ADB
+  scraper's bubble-fragmentation. ~114 turns vs 10k raw msgs. Re-embeds leave
+  orphan vectors (no `deleteVector` in GenesisBlock); `turns.json` is the source
+  of truth and search filters dense hits to current reps.
 - GenesisBlock = Rust napi DB `@freshair129/gks-genesis-block-native`
   (source at `G:\GenesisBlock_Dev\GenesisBlock`). HQL ids with `:` need quotes.
 - HTTP: `/ingest` `/` (dashboard) `/events` (SSE) `/api/{messages,stats,threads,

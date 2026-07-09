@@ -45,10 +45,18 @@ class MessengerReaderService : AccessibilityService() {
             size > 600
     }
 
-    /** Obvious UI chrome we don't want to archive as "messages". */
+    /** Obvious UI chrome we don't want to archive as "messages" (belt-and-suspenders; see [chromeClasses]). */
     private val chrome = setOf(
         "Aa", "GIF", "Open Photos", "Camera", "Voice message", "Send",
         "Active now", "Message", "Home", "Chats", "Menu", "Back", "Search"
+    )
+
+    /** Widget classes that are always controls, never message content — locale independent. */
+    private val chromeClasses = setOf(
+        "android.widget.Button", "android.widget.ImageButton", "android.widget.ImageView",
+        "android.widget.EditText", "android.widget.CheckBox", "android.widget.Switch",
+        "android.widget.RadioButton", "android.widget.SeekBar", "android.widget.Spinner",
+        "android.widget.ToggleButton"
     )
 
     private var lastCaptureAt = 0L
@@ -82,8 +90,10 @@ class MessengerReaderService : AccessibilityService() {
         // Conversation/contact name = the top-most short line in the app bar area.
         val convo = lines.filter { it.top < 350 }.minByOrNull { it.top }?.text ?: "Messenger"
 
+        val bottomBand = resources.displayMetrics.heightPixels * 0.88
         val fresh = ArrayList<ScreenRow>()
         for (l in lines) {
+            if (l.top < 350 || l.top > bottomBand) continue // app bar / composer & tab bar strip
             if (l.text in chrome) continue
             if (l.text == convo) continue
             val key = "$convo|${l.side}|${l.text}"
@@ -107,14 +117,20 @@ class MessengerReaderService : AccessibilityService() {
     /** Depth-first walk: collect every node that renders text or has a description. */
     private fun collect(node: AccessibilityNodeInfo?, width: Int, out: MutableList<Line>) {
         node ?: return
-        val raw = node.text?.toString()?.trim()?.takeIf { it.isNotBlank() }
-            ?: node.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }
-        if (raw != null && raw.length in 1..2000) {
-            val bounds = Rect()
-            node.getBoundsInScreen(bounds)
-            // Right-aligned bubbles are usually the user's own messages.
-            val side = if (bounds.centerX() > width * 0.55) "me" else "them"
-            out.add(Line(raw, bounds.top, side))
+        val cls = node.className?.toString()
+        if (cls == null || cls !in chromeClasses) {
+            val fromText = node.text?.toString()?.trim()?.takeIf { it.isNotBlank() }
+            // Icon-only controls expose a contentDescription (for screen readers) but never
+            // set .text — a reliable, locale-independent signal that this is a button, not a message.
+            val isIconButton = fromText == null && node.isClickable
+            val raw = fromText ?: node.contentDescription?.toString()?.trim()?.takeIf { it.isNotBlank() }
+            if (raw != null && raw.length in 1..2000 && !isIconButton) {
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                // Right-aligned bubbles are usually the user's own messages.
+                val side = if (bounds.centerX() > width * 0.55) "me" else "them"
+                out.add(Line(raw, bounds.top, side))
+            }
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)

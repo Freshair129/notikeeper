@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawn } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -29,8 +30,23 @@ import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
 const DASHBOARD_FILE = path.join(__dirname, "dashboard.html");
+const CHATLOG_DIR = path.join(__dirname, "chatlog");
 const PORT = parseInt(process.env.NOTIKEEPER_PORT || "8765", 10);
 const TOKEN = process.env.NOTIKEEPER_TOKEN || "";
+const CONFIG_FILE = path.join(__dirname, "config.json");
+
+// Shared mobile config (currently just the capture-app whitelist) — pushed to
+// the phone via QR pairing so it doesn't have to be ticked by hand on-device.
+let CONFIG = { captureApps: [] };
+try {
+  if (fs.existsSync(CONFIG_FILE)) {
+    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
+    if (Array.isArray(parsed.captureApps)) CONFIG.captureApps = parsed.captureApps;
+  }
+} catch (e) { console.error("[notikeeper-mcp] config load failed:", e.message); }
+function saveConfig() {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 2));
+}
 
 const rows = [];
 const seen = new Set();
@@ -229,6 +245,46 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
+  // ── Chatlog API ──────────────────────────────────────────────────────────────
+  if (req.method === "GET" && url.pathname === "/api/chatlog") {
+    if (!fs.existsSync(CHATLOG_DIR)) {
+      res.writeHead(200, { "Content-Type": "application/json" }); res.end("[]"); return;
+    }
+    const threads = fs.readdirSync(CHATLOG_DIR)
+      .filter(f => f.endsWith(".json"))
+      .map(f => {
+        try {
+          const d = JSON.parse(fs.readFileSync(path.join(CHATLOG_DIR, f), "utf8"));
+          return { slug: f.replace(".json", ""), title: d.title, count: d.count, from: d.from, to: d.to };
+        } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.to - a.to);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(threads));
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname.startsWith("/api/chatlog/")) {
+    const slug = decodeURIComponent(url.pathname.slice("/api/chatlog/".length));
+    const file = path.join(CHATLOG_DIR, `${slug}.json`);
+    if (!fs.existsSync(file)) {
+      res.writeHead(404); res.end("not found"); return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(fs.readFileSync(file, "utf8"));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/chatlog/rebuild") {
+    res.writeHead(202, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "rebuilding" }));
+    // Run rebuild in background — stderr goes to server's stderr (not stdout/MCP)
+    spawn(process.execPath, [path.join(__dirname, "rebuild-chatlog.mjs")],
+      { stdio: ["ignore", "ignore", "inherit"], detached: false });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/timeline") {
     const app    = url.searchParams.get("app") || "";
     const denoise = url.searchParams.get("denoise") === "1";
@@ -254,11 +310,15 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/api/stats") {
-    const byApp = {}, bySource = {}, byNoise = {};
+    const byApp = {}, bySource = {}, byNoise = {}, byPkg = {};
     let min = Infinity, max = -Infinity, noiseCount = 0;
     for (const r of rows) {
       byApp[r.app] = (byApp[r.app] || 0) + 1;
       bySource[r.source] = (bySource[r.source] || 0) + 1;
+      if (r.pkg) {
+        if (!byPkg[r.pkg]) byPkg[r.pkg] = { app: r.app, count: 0 };
+        byPkg[r.pkg].count++;
+      }
       if (r.time < min) min = r.time;
       if (r.time > max) max = r.time;
       const tag = classifyNoise(r);
@@ -271,6 +331,7 @@ const httpServer = http.createServer((req, res) => {
       cleanCount: rows.length - noiseCount,
       byNoise,
       byApp: Object.fromEntries(Object.entries(byApp).sort((a, b) => b[1] - a[1])),
+      byPkg,
       bySource,
       minTime: rows.length ? min : null,
       maxTime: rows.length ? max : null,
@@ -346,10 +407,41 @@ const httpServer = http.createServer((req, res) => {
       const focus = url.searchParams.get("focus");
       const onlyApp = url.searchParams.get("app");
       const includeMsgs = url.searchParams.get("messages") === "1";
+
+      // ── Junk thread title filter (mirrors rebuild-chatlog.mjs) ──
+      const GRAPH_JUNK_RE = [
+        /^Open /i, /^Close /i, /^Clear /i, /^New message/i,
+        /^Story tray/i, /drawer/i, /ปุ่ม$/, /^ปุ่ม/,
+        /^Shared Link:/i, /^End-to-end/i, /^More options/i,
+        /^Like button/i, /^Shop now/i, /^Available /i,
+        /^Reel by /i, /^ย่อ/, /^ขยาย/,
+        /^(back|home|menu|cancel|send|search|loading|video|photo|audio|call|scanner)$/i,
+        /\.(com|game|net|org|io)\b/i,  // URL-looking titles
+        /^https?:\/\//i,
+        /\|/,                           // "X | Y" web page titles / breadcrumbs
+        /^📍/,                          // location emoji prefix
+      ];
+      const GRAPH_JUNK_SET = new Set([
+        "New Message","New message","Story tray","Open navigation drawer",
+        "Clear query","Close browser","Notifications","More options",
+        "Sent","Seen","Delivered","Active Now","Typing","Typing…","GIF",
+        "Camera","Audio call","Video call","Asana 2 of 2","QR Scanner",
+        "Shop now","Like button",
+      ]);
+      const isJunkTitle = (t) => {
+        if (!t || t.length < 2) return true;
+        if (GRAPH_JUNK_SET.has(t)) return true;
+        if (!/\s/.test(t) && t.length <= 12) return true; // single short word → likely button
+        if (t.endsWith(":")) return true;                  // "Available add-ons:" etc.
+        if (/•/.test(t) && t.split("•").map(s=>s.trim()).some((s,_,a)=>a.filter(x=>x===s).length>1)) return true; // "X • X"
+        for (const re of GRAPH_JUNK_RE) if (re.test(t)) return true;
+        return false;
+      };
+
       const NODE_STYLE = {
-        App:     { color: "#5EC1FF", size: 26, shape: "dot",     fontColor: "#0F1B2D" },
-        Thread:  { color: "#FFC857", size: 18, shape: "diamond", fontColor: "#0F1B2D" },
-        User:    { color: "#9AE6B4", size: 14, shape: "dot",     fontColor: "#0F1B2D" },
+        App:     { color: "#5EC1FF", size: 26, shape: "dot",     fontColor: "#E6EEF8" },
+        Thread:  { color: "#FFC857", size: 18, shape: "diamond", fontColor: "#E6EEF8" },
+        User:    { color: "#9AE6B4", size: 14, shape: "dot",     fontColor: "#E6EEF8" },
         Message: { color: "#C8D5E5", size:  6, shape: "dot",     fontColor: "#E6EEF8" },
       };
       const baseFor = (l) => NODE_STYLE[l] || { color: "#888", size: 8, shape: "dot", fontColor: "#fff" };
@@ -409,10 +501,20 @@ const httpServer = http.createServer((req, res) => {
         });
       };
 
+      // Dedup by name — keep highest message_count per name
+      const byName = new Map();
+      for (const t of threads.filter(t => !isJunkTitle(t.name))) {
+        const prev = byName.get(t.name);
+        if (!prev || t.message_count > prev.message_count) byName.set(t.name, t);
+      }
+      const cleanThreads = [...byName.values()];
+      const cleanThreadIdSet = new Set(cleanThreads.map(t => t.id));
+      const cleanParts = parts.filter(p => cleanThreadIdSet.has(p.thread_id));
+
       for (const a of apps) addNode(`app:${a}`, a, "App");
-      for (const t of threads) {
+      for (const t of cleanThreads) {
         const tid = `thread:${t.id}`;
-        const lbl = t.name.length > 28 ? t.name.slice(0, 28) + "…" : t.name;
+        const lbl = t.name.length > 26 ? t.name.slice(0, 26) + "…" : t.name;
         addNode(tid, lbl, "Thread", { app: t.app, msgs: t.message_count });
         const w = edgeWidth(t.message_count);
         edges.push({
@@ -423,7 +525,7 @@ const httpServer = http.createServer((req, res) => {
         });
       }
       const userSet = new Set();
-      for (const p of parts) {
+      for (const p of cleanParts) {
         const uid = `user:${p.user_id}`;
         userSet.add(uid);
         const lbl = p.name.length > 22 ? p.name.slice(0, 22) + "…" : p.name;
@@ -516,9 +618,37 @@ const httpServer = http.createServer((req, res) => {
       port: PORT,
       token: TOKEN || "",
       updateUrl,
+      ...(CONFIG.captureApps.length ? { captureApps: CONFIG.captureApps } : {}),
     };
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(payload));
+    return;
+  }
+
+  // Shared mobile config (e.g. default capture-app whitelist), read/written by
+  // the PC dashboard and pushed to the phone via /api/pair(-qr) above.
+  if (req.method === "GET" && url.pathname === "/api/config") {
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify(CONFIG));
+    return;
+  }
+  if (req.method === "POST" && url.pathname === "/api/config") {
+    let body = "";
+    req.on("data", (c) => { body += c; if (body.length > 100_000) req.destroy(); });
+    req.on("end", () => {
+      try {
+        const parsed = JSON.parse(body);
+        if (Array.isArray(parsed.captureApps)) {
+          CONFIG.captureApps = parsed.captureApps.filter((s) => typeof s === "string");
+          saveConfig();
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: true, config: CONFIG }));
+      } catch (e) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: String(e) }));
+      }
+    });
     return;
   }
 
@@ -530,6 +660,7 @@ const httpServer = http.createServer((req, res) => {
     const payload = JSON.stringify({
       type: "notikeeper-pair", v: 1,
       endpoint, token: TOKEN || "", updateUrl,
+      ...(CONFIG.captureApps.length ? { captureApps: CONFIG.captureApps } : {}),
     });
     QRCode.toBuffer(payload, {
       width: 320, margin: 2,

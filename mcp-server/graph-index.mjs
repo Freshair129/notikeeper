@@ -20,6 +20,7 @@
  *   PARTICIPATES  user   -> thread
  */
 import { createRequire } from "node:module";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { searchLexical } from "./relations.mjs";
@@ -55,7 +56,12 @@ const msgId    = (id)   => `msg:${id}`;
 // BGE-M3 dimensions — multilingual, strong on Thai. Served by Ollama.
 const EMBED_MODEL = "bge-m3";
 const EMBED_DIM = 1024;
-const COLLECTION = "messages";
+// We embed *conversational turns* (consecutive same-sender fragments coalesced),
+// not raw message bubbles. The old per-message "messages" collection is left
+// in place but unused — GenesisBlock has no deleteVector, so a new collection is
+// the only way to drop the stale per-fragment vectors. See buildTurns().
+const COLLECTION = "turns";
+const TURNS_PATH = path.join(__dirname, "turns.json");
 const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 
 /** Get one embedding from Ollama. Returns a Float32Array of length EMBED_DIM. */
@@ -152,38 +158,109 @@ export async function rebuildFromSqlite(sqlite) {
 }
 
 /**
- * Generate embeddings for every Message node and stream them into the
- * `messages` collection. Idempotent — skips ones already vectorised.
- * Returns counts.
+ * Coalesce raw message rows into *conversational turns* — the embedding unit.
+ *
+ * Why: the ADB scraper batch-captures one spoken burst as many tiny bubbles
+ * ("เด็ก16" / "หลอกว่า19" / "วันนี้นัด…"), each at the same timestamp. Embedding
+ * each bubble gives near-random 1024d vectors that pollute recall; merging them
+ * into one turn restores semantic signal. (See the qdrant-search-quality skill:
+ * splitting mid-sentence drops quality 30-40%.)
+ *
+ * What counts as embeddable: `scrape`-source rows only. The ADB scraper scrolls
+ * the *interior* of a conversation, so scrape rows are clean dialogue with a real
+ * sender + side. The other two sources are noise for retrieval and are dropped:
+ *   - `screen` = the Messenger inbox/home accessibility dump ("Seen by…", "active
+ *     now", "11:09 PM", "Chats, 12 unread, Tab 1 of 4") — UI chrome, not dialogue;
+ *   - `noti`   = app notifications (weather, promos, GitHub) — app spam, and any
+ *     real ones just duplicate the scraped dialogue.
+ * Consecutive scrape rows with the same (thread, sender, side) within `windowMs`
+ * merge into one turn; turns shorter than `minTurnChars` are dropped as too thin.
+ * Returns [{ repId, ids, text, thread_id, sender_id, side, time }]. `repId` is the
+ * first row's id — a real Message node, so hybridSearch resolves it.
  */
-export async function embedMessages(sqlite, { batchSize = 32, onProgress } = {}) {
+export function buildTurns(sqlite, { windowMs = 5 * 60 * 1000, minTurnChars = 8, minFragChars = 2 } = {}) {
+  const rows = sqlite.prepare(
+    "SELECT id, thread_id, sender_id, side, text, time, source FROM messages WHERE source='scrape' ORDER BY thread_id, time, id"
+  ).all();
+
+  const turns = [];
+  let cur = null;
+  const flush = () => { if (cur) { cur.text = cur.texts.join(" "); turns.push(cur); cur = null; } };
+
+  for (const m of rows) {
+    const txt = (m.text || "").trim();
+    if (txt.length < minFragChars) continue;
+
+    const sameSpeaker = cur && cur.thread_id === m.thread_id &&
+      (cur.side || "") === (m.side || "") && cur.sender_id === m.sender_id;
+    if (sameSpeaker && (m.time - cur.lastTime) <= windowMs) {
+      if (!cur.texts.includes(txt)) cur.texts.push(txt);   // drop intra-turn dupes (noti vs scrape)
+      cur.ids.push(m.id);
+      cur.lastTime = m.time;
+    } else {
+      flush();
+      cur = { repId: m.id, ids: [m.id], texts: [txt], thread_id: m.thread_id,
+              sender_id: m.sender_id, side: m.side, time: m.time, lastTime: m.time, source: m.source };
+    }
+  }
+  flush();
+  return turns.filter((t) => t.text.length >= minTurnChars);
+}
+
+/** Persist the turn map so search can hydrate merged text + remap sparse hits. */
+function writeTurnMap(turns) {
+  const map = {};
+  for (const t of turns) {
+    map[msgId(t.repId)] = { text: t.text, ids: t.ids, thread_id: t.thread_id,
+                            sender_id: t.sender_id, side: t.side, time: t.time };
+  }
+  fs.writeFileSync(TURNS_PATH, JSON.stringify(map));
+}
+
+let _turnMap = null;
+/** Lazy-load turns.json → { reps, fragToRep, repSet }. Empty if not embedded yet. */
+function turnMap() {
+  if (_turnMap) return _turnMap;
+  let reps = {};
+  try { reps = JSON.parse(fs.readFileSync(TURNS_PATH, "utf8")); } catch { reps = {}; }
+  const fragToRep = new Map();
+  for (const [repId, t] of Object.entries(reps))
+    for (const fid of t.ids) fragToRep.set(msgId(fid), repId);
+  _turnMap = { reps, fragToRep, repSet: new Set(Object.keys(reps)) };
+  return _turnMap;
+}
+
+/**
+ * Embed conversational turns into the `turns` collection. Rebuilds the turn map
+ * each run (idempotent — addVector overwrites by id). Returns counts.
+ */
+// batchSize stays small: Ollama's embedding endpoint drops requests under high
+// concurrency (16 parallel → ~24/138 failed; 4 → clean). 138 turns @ ~190ms is
+// a few seconds either way, so favour reliability.
+export async function embedMessages(sqlite, { batchSize = 4, onProgress } = {}) {
   await ensureCollection();
   const gdb = await openGraph();
 
-  // Build a list of (msg_id, text) that still need embeddings. To stay simple
-  // and idempotent we re-add every time — `addVector` overwrites cleanly.
-  const rows = sqlite.prepare("SELECT id, text FROM messages ORDER BY id").all();
+  const turns = buildTurns(sqlite);
+  writeTurnMap(turns);
+  _turnMap = null;   // invalidate cache so search picks up the fresh map
+
   let done = 0, failed = 0;
-  for (let i = 0; i < rows.length; i += batchSize) {
-    const batch = rows.slice(i, i + batchSize);
-    const embeds = await Promise.all(batch.map(async (r) => {
-      try {
-        const v = await embed(r.text);
-        return { id: msgId(r.id), v };
-      } catch (e) {
-        failed++;
-        return null;
-      }
+  for (let i = 0; i < turns.length; i += batchSize) {
+    const batch = turns.slice(i, i + batchSize);
+    const embeds = await Promise.all(batch.map(async (t) => {
+      try { return { id: msgId(t.repId), v: await embed(t.text) }; }
+      catch { failed++; return null; }
     }));
     for (const e of embeds) {
       if (!e) continue;
       try { await gdb.addVector(e.id, COLLECTION, e.v); done++; } catch { failed++; }
     }
-    if (onProgress) onProgress({ done, failed, total: rows.length });
+    if (onProgress) onProgress({ done, failed, total: turns.length });
   }
   await gdb.flushIndex();
   await gdb.saveState();
-  return { done, failed, total: rows.length, dim: EMBED_DIM, model: EMBED_MODEL };
+  return { done, failed, total: turns.length, dim: EMBED_DIM, model: EMBED_MODEL, collection: COLLECTION };
 }
 
 /**
@@ -200,7 +277,25 @@ export async function embedMessages(sqlite, { batchSize = 32, onProgress } = {})
 export async function searchSemantic(queryText, { k = 20, alpha = 0.0 } = {}) {
   const gdb = await openGraph();
   const v = await embed(queryText);
-  return gdb.hybridSearch({ queryVector: v, k, collection: COLLECTION, alpha });
+  const { reps, repSet } = turnMap();
+
+  // Over-fetch, then keep only *current* turn reps. Re-embeds leave orphan vectors
+  // behind (GenesisBlock has no deleteVector), so the collection accumulates stale
+  // rep ids from earlier turn segmentations — filter them out here by repSet.
+  const raw = await gdb.hybridSearch({ queryVector: v, k: Math.max(k * 5, 80), collection: COLLECTION, alpha });
+
+  const hits = [];
+  for (const h of raw) {
+    const n = h.node || h;
+    if (repSet.size && !repSet.has(n.id)) continue;     // drop orphan vectors
+    // hybridSearch returns the rep Message node, whose props.text is only the first
+    // fragment. Overlay the merged turn text so callers (fmtHit) show the full turn.
+    const t = reps[n.id];
+    if (t && n.props) n.props.text = t.text;
+    hits.push(h);
+    if (hits.length >= k) break;
+  }
+  return hits;
 }
 
 /** Dense retrieval as a plain ranked id list ("msg:<id>"), best first. */
@@ -236,15 +331,31 @@ export function rrfFuse(rankedLists, { k = 60, limit = 20 } = {}) {
  * ({ node:{id,labels,props}, score, sources }).
  */
 export async function searchHybridRRF(sqlite, queryText, { k = 20, candidates = 50, rrfK = 60 } = {}) {
-  const [dense, sparse] = await Promise.all([
-    searchDense(queryText, { k: candidates }),
-    Promise.resolve(searchLexical(sqlite, queryText, { limit: candidates })),
+  const { reps, fragToRep, repSet } = turnMap();
+
+  const [dense, sparseRaw] = await Promise.all([
+    searchDense(queryText, { k: candidates }),                          // already turn-rep ids
+    Promise.resolve(searchLexical(sqlite, queryText, { limit: candidates })), // raw fragment ids
   ]);
+
+  // Lift each sparse fragment hit to its turn rep so both lists share one id
+  // space (clean RRF, no rep/fragment near-dupes). Fragments in no turn = junk
+  // (chrome / non-conversational) → dropped, keeping the sparse half noise-free.
+  const sparse = [];
+  const seen = new Set();
+  for (const id of sparseRaw) {
+    const rep = fragToRep.get(id) || (repSet.has(id) ? id : null);
+    if (!rep || seen.has(rep)) continue;
+    seen.add(rep);
+    sparse.push(rep);
+  }
+
   const fused = rrfFuse([dense, sparse], { k: rrfK, limit: k });
   if (!fused.length) return [];
 
   const denseSet = new Set(dense);
   const sparseSet = new Set(sparse);
+  // Hydrate: merged text from the turn map; thread/sender/time/source from SQLite.
   const ids = fused.map((f) => Number(f.id.slice(4))); // strip "msg:"
   const rows = sqlite
     .prepare(
@@ -257,14 +368,16 @@ export async function searchHybridRRF(sqlite, queryText, { k = 20, candidates = 
 
   return fused.map((f) => {
     const m = byId.get(Number(f.id.slice(4)));
+    const t = reps[f.id];
     return {
       node: {
         id: f.id,
-        labels: ["Message", m?.source === "noti" ? "Notification" : "ScreenLine"],
-        props: m
-          ? { text: m.text, side: m.side, time: m.time,
-              thread_id: m.thread_id, sender: m.sender, source: m.source }
-          : {},
+        labels: ["Message", "Turn"],
+        props: {
+          text: t?.text ?? m?.text ?? "",
+          side: m?.side, time: m?.time,
+          thread_id: m?.thread_id, sender: m?.sender, source: m?.source,
+        },
       },
       score: f.score,
       sources: [denseSet.has(f.id) && "dense", sparseSet.has(f.id) && "sparse"].filter(Boolean),

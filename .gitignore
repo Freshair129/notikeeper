@@ -11,6 +11,7 @@ captures/
 # Node (MCP server)
 mcp-server/node_modules/
 mcp-server/data.jsonl
+mcp-server/config.json
 mcp-server/relations.db
 mcp-server/relations.db-shm
 mcp-server/relations.db-wal
@@ -18,6 +19,8 @@ mcp-server/graph.db/
 mcp-server/graph.db
 mcp-server/graph.db-shm
 mcp-server/graph.db-wal
+mcp-server/turns.json
+mcp-server/chatlog/
 
 # Landing page (Vite)
 landing/node_modules/

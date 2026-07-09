@@ -171,6 +171,33 @@ class NotiStore private constructor(
         return result
     }
 
+    /** Every message in one conversation (same pkg + title), newest first — for the thread detail view. */
+    fun threadMessages(pkg: String, title: String): List<NotiItem> {
+        val cursor = database.rawQuery(
+            "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications " +
+                "WHERE pkg = ? AND title = ? ORDER BY postTime DESC, id DESC LIMIT 2000",
+            arrayOf(pkg, title)
+        )
+        val result = ArrayList<NotiItem>()
+        cursor.use {
+            while (it.moveToNext()) {
+                result.add(
+                    NotiItem(
+                        id = it.getLong(0),
+                        source = it.getString(1),
+                        pkg = it.getString(2),
+                        appName = it.getString(3),
+                        title = it.getString(4),
+                        text = it.getString(5),
+                        side = it.getString(6),
+                        postTime = it.getLong(7)
+                    )
+                )
+            }
+        }
+        return result
+    }
+
     /** Aggregate snapshot for the in-app dashboard. */
     data class Stats(
         val total: Long,
@@ -236,6 +263,52 @@ class NotiStore private constructor(
         val list = ArrayList<Pair<String, String>>()
         cursor.use {
             while (it.moveToNext()) list.add(it.getString(0) to it.getString(1))
+        }
+        return list
+    }
+
+    /** One conversation, grouped by (pkg, title) — title doubles as sender/contact/group name. */
+    data class ThreadSummary(
+        val pkg: String,
+        val appName: String,
+        val title: String,
+        val lastText: String,
+        val count: Long,
+        val lastTime: Long
+    )
+
+    /** Conversations grouped by app + sender/title, newest first. No backend needed — local only. */
+    fun listThreads(): List<ThreadSummary> {
+        val cursor = database.rawQuery(
+            """SELECT pkg, appName, title, text, c, lastTime FROM (
+                 SELECT n.pkg pkg, n.appName appName, n.title title, n.text text, t.c c, t.lastTime lastTime
+                 FROM notifications n
+                 JOIN (
+                   SELECT pkg, title, COUNT(*) c, MAX(postTime) lastTime
+                   FROM notifications
+                   WHERE title != ''
+                   GROUP BY pkg, title
+                 ) t ON n.pkg = t.pkg AND n.title = t.title AND n.postTime = t.lastTime
+               )
+               GROUP BY pkg, title
+               ORDER BY lastTime DESC
+               LIMIT 500""",
+            null
+        )
+        val list = ArrayList<ThreadSummary>()
+        cursor.use {
+            while (it.moveToNext()) {
+                list.add(
+                    ThreadSummary(
+                        pkg = it.getString(0),
+                        appName = it.getString(1),
+                        title = it.getString(2),
+                        lastText = it.getString(3),
+                        count = it.getLong(4),
+                        lastTime = it.getLong(5)
+                    )
+                )
+            }
         }
         return list
     }

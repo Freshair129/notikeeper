@@ -79,11 +79,24 @@ object Settings {
         return allow.isEmpty() || pkg in allow
     }
 
-    /** Packages allowed to be captured (notifications + screen). Empty set = all apps. */
-    fun getCaptureApps(c: Context): Set<String> = prefs(c).getStringSet("capture_apps", emptySet()) ?: emptySet()
+    /** Fresh-install default: only the main chat apps, not every notification on the device. */
+    val DEFAULT_CAPTURE_APPS = setOf(
+        "jp.naver.line.android",  // LINE
+        "com.facebook.orca",      // Messenger
+        "com.whatsapp",           // WhatsApp
+        "org.telegram.messenger"  // Telegram
+    )
+
+    /**
+     * Packages allowed to be captured (notifications + screen).
+     * Unset (fresh install) = [DEFAULT_CAPTURE_APPS]. Explicitly cleared to empty by the
+     * user = capture every app.
+     */
+    fun getCaptureApps(c: Context): Set<String> =
+        prefs(c).getStringSet("capture_apps", DEFAULT_CAPTURE_APPS) ?: DEFAULT_CAPTURE_APPS
     fun setCaptureApps(c: Context, v: Set<String>) = prefs(c).edit().putStringSet("capture_apps", v).apply()
 
-    /** True if [pkg] should be captured: whitelist empty (all) or contains it. */
+    /** True if [pkg] should be captured: default/whitelist contains it, or the whitelist was explicitly cleared (= all). */
     fun shouldCapture(c: Context, pkg: String): Boolean {
         val allow = getCaptureApps(c)
         return allow.isEmpty() || pkg in allow

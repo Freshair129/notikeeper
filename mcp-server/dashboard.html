@@ -35,10 +35,13 @@
           <span id="live-label" class="text-[var(--muted)]">connecting…</span>
         </div>
       </div>
-      <div class="flex items-center gap-2 text-xs">
+      <div class="flex items-center gap-3 text-xs">
         <span class="text-[var(--muted)]">รวม</span>
         <span id="total-pill" class="mono px-2 py-1 rounded bg-white/5 border border-white/10 text-white">0</span>
         <span class="text-[var(--muted)]">ข้อความ</span>
+        <button id="pair-header" class="ml-1 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--gold)]/90 text-[var(--ink)] font-semibold hover:bg-[var(--gold)] transition text-xs">
+          📱 QR
+        </button>
       </div>
     </div>
   </header>
@@ -48,6 +51,7 @@
     <div class="inline-flex bg-white/[0.03] border border-white/10 rounded-full p-1 text-sm">
       <button class="tab-btn px-4 py-1.5 rounded-full font-semibold" data-tab="feed">📥 Feed</button>
       <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="threads">💬 Threads</button>
+      <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="chat">💬 Chat</button>
       <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="timeline">📅 Timeline</button>
       <button class="tab-btn px-4 py-1.5 rounded-full text-[var(--muted)]" data-tab="graph">🕸️ Graph</button>
     </div>
@@ -183,6 +187,25 @@
       </div>
     </section>
 
+    <!-- Chat log view -->
+    <section id="chat-view" class="hidden grid gap-4 lg:grid-cols-[280px_1fr]" style="min-height:70vh">
+      <!-- Thread list sidebar -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl flex flex-col">
+        <div class="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+          <h2 class="font-semibold">💬 Messenger Chats</h2>
+          <button id="chat-rebuild" title="Rebuild chat log" class="text-xs text-[var(--muted)] hover:text-white px-2 py-1 rounded-lg hover:bg-white/5 transition">🔄</button>
+        </div>
+        <div id="chat-list" class="flex-1 overflow-y-auto divide-y divide-white/5"></div>
+      </div>
+      <!-- Message panel -->
+      <div class="bg-white/[0.03] border border-white/10 rounded-2xl flex flex-col">
+        <div id="chat-panel-header" class="px-4 py-3 border-b border-white/5 flex items-center gap-3">
+          <span class="font-semibold text-[var(--muted)]">เลือกชื่อทางซ้าย</span>
+        </div>
+        <div id="chat-panel-body" class="flex-1 overflow-y-auto px-4 py-3 space-y-1"></div>
+      </div>
+    </section>
+
     <!-- Pairing modal -->
     <div id="pair-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
       <div class="bg-[var(--ink-2)] border border-white/10 rounded-2xl max-w-md w-full p-6">
@@ -208,6 +231,23 @@
         </div>
         <div class="mt-4 text-xs text-[var(--muted)] border-t border-white/5 pt-3">
           มือถือต้องอยู่ใน Wi-Fi วงเดียวกันกับ PC · ถ้า IP ผิด เช็คว่าคอมต่อ Ethernet/Wi-Fi อะไรอยู่
+        </div>
+
+        <div class="mt-4 border-t border-white/5 pt-4">
+          <div class="flex items-center justify-between mb-2">
+            <h4 class="font-semibold text-sm">🎯 ตัวกรองการบันทึก (ส่งไปพร้อม QR)</h4>
+            <span id="capture-status" class="text-xs text-[var(--muted)]">—</span>
+          </div>
+          <p class="text-xs text-[var(--muted)] mb-3">
+            เลือกแอปที่จะให้มือถือบันทึก แล้วสแกน QR ใหม่ให้มีผล · ไม่เลือกอะไรเลย = มือถือใช้ค่าเริ่มต้นของตัวเอง (LINE/Messenger/WhatsApp/Telegram)
+          </p>
+          <div id="capture-apps-list" class="space-y-1 max-h-40 overflow-y-auto mb-3 text-sm">
+            <div class="text-xs text-[var(--muted)] px-2">กำลังโหลด...</div>
+          </div>
+          <div class="flex gap-2">
+            <button id="capture-save" class="flex-1 rounded-lg bg-[var(--sky)] text-[var(--ink)] font-semibold px-3 py-2 text-xs hover:bg-[#9AD5FF] transition">บันทึกตัวกรอง</button>
+            <button id="capture-clear" class="rounded-lg bg-white/5 border border-white/10 px-3 py-2 text-xs hover:bg-white/10 transition">ล้าง (ทุกแอป)</button>
+          </div>
         </div>
       </div>
     </div>
@@ -361,16 +401,74 @@ function connectSSE() {
 
 // Pair modal
 const pairModal = $("#pair-modal");
-$("#pair").addEventListener('click', async () => {
+async function openPairModal() {
   const info = await (await fetch('/api/pair')).json();
   $("#pair-endpoint").textContent = info.endpoint;
   $("#pair-ip").textContent = `${info.ip}:${info.port}`;
-  // Cache-bust so the IP shows correctly even if the user's adapter changed
   $("#pair-qr").src = '/api/pair-qr?t=' + Date.now();
   pairModal.classList.remove('hidden');
-});
+  renderCaptureAppsPicker();
+}
+$("#pair").addEventListener('click', openPairModal);
+$("#pair-header").addEventListener('click', openPairModal);
 $("#pair-close").addEventListener('click', () => pairModal.classList.add('hidden'));
 pairModal.addEventListener('click', (e) => { if (e.target === pairModal) pairModal.classList.add('hidden'); });
+
+// Capture-app filter — picked here, pushed to the phone inside the /api/pair(-qr) payload above.
+const DEFAULT_CAPTURE_APPS = [
+  { pkg: 'jp.naver.line.android', app: 'LINE' },
+  { pkg: 'com.facebook.orca', app: 'Messenger' },
+  { pkg: 'com.whatsapp', app: 'WhatsApp' },
+  { pkg: 'org.telegram.messenger', app: 'Telegram' },
+];
+
+function updateCaptureStatus(n) {
+  $("#capture-status").textContent = n > 0 ? `กำลังส่ง ${n} แอป` : 'ไม่ได้ตั้งค่า';
+}
+
+async function renderCaptureAppsPicker() {
+  const [statRes, cfgRes] = await Promise.all([fetch('/api/stats'), fetch('/api/config')]);
+  const stat = await statRes.json();
+  const cfg = await cfgRes.json();
+  const selected = new Set(cfg.captureApps || []);
+
+  const byPkg = stat.byPkg || {};
+  const merged = new Map();
+  for (const d of DEFAULT_CAPTURE_APPS) merged.set(d.pkg, { app: d.app, count: byPkg[d.pkg]?.count || 0 });
+  for (const [pkg, info] of Object.entries(byPkg)) {
+    if (!merged.has(pkg)) merged.set(pkg, { app: info.app, count: info.count });
+  }
+  const list = Array.from(merged.entries()).sort((a, b) => b[1].count - a[1].count);
+
+  $("#capture-apps-list").innerHTML = list.map(([pkg, info]) => `
+    <label class="flex items-center gap-2 cursor-pointer select-none px-2 py-1.5 rounded-lg hover:bg-white/5">
+      <input type="checkbox" data-pkg="${escapeHtml(pkg)}" class="capture-app-checkbox w-4 h-4 accent-[var(--sky)]" ${selected.has(pkg) ? 'checked' : ''}>
+      <span class="flex-1">${escapeHtml(info.app)}</span>
+      <span class="mono text-[10px] text-[var(--muted)]">${info.count ? info.count.toLocaleString() + ' ข้อความ' : ''}</span>
+    </label>
+  `).join('') || `<div class="text-xs text-[var(--muted)] px-2">ยังไม่มีข้อมูลแอป</div>`;
+
+  updateCaptureStatus(selected.size);
+}
+
+async function saveCaptureApps(pkgs) {
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ captureApps: pkgs }),
+  });
+  updateCaptureStatus(pkgs.length);
+  $("#pair-qr").src = '/api/pair-qr?t=' + Date.now(); // payload just changed
+}
+
+$("#capture-save").addEventListener('click', () => {
+  const pkgs = Array.from(document.querySelectorAll('.capture-app-checkbox:checked')).map(el => el.dataset.pkg);
+  saveCaptureApps(pkgs);
+});
+$("#capture-clear").addEventListener('click', () => {
+  document.querySelectorAll('.capture-app-checkbox').forEach(el => { el.checked = false; });
+  saveCaptureApps([]);
+});
 
 // ===== Tabs =====
 const feedSections = ['#stats-grid', '#install-info', '#download'].map(s => $(s)).filter(Boolean);
@@ -473,6 +571,9 @@ function showTab(tab) {
   } else if (tab === 'timeline') {
     document.querySelector('#timeline-view')?.classList.remove('hidden');
     if (!window.__tlLoaded) { loadTimeline(); window.__tlLoaded = true; }
+  } else if (tab === 'chat') {
+    document.querySelector('#chat-view')?.classList.remove('hidden');
+    if (!window.__chatLoaded) { loadChatList(); window.__chatLoaded = true; }
   }
 }
 tabBtns.forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
@@ -543,7 +644,7 @@ async function loadGraph(focus) {
     physics: { solver: 'forceAtlas2Based', forceAtlas2Based: { gravitationalConstant: -55, springLength: 95 }, stabilization: { iterations: 200 } },
     interaction: { hover: true, tooltipDelay: 120 },
     edges: { smooth: { type: 'continuous' }, font: { color: '#8FA4BC', size: 9, strokeWidth: 0 }, arrows: { to: { scaleFactor: 0.5 } } },
-    nodes: { borderWidth: 1.5 },
+    nodes: { borderWidth: 1.5, font: { color: '#E6EEF8', size: 13, strokeWidth: 2, strokeColor: '#0B1322' } },
   });
   network.on('doubleClick', (params) => {
     if (params.nodes.length) {
@@ -746,6 +847,119 @@ document.querySelector('#tl-day-close')?.addEventListener('click', () => {
 loadAll();
 connectSSE();
 showTab('feed');
+
+// ===== Chat log tab =====
+async function loadChatList() {
+  const list = document.querySelector('#chat-list');
+  list.innerHTML = '<div class="p-4 text-sm text-[var(--muted)]">กำลังโหลด…</div>';
+  try {
+    const threads = await (await fetch('/api/chatlog')).json();
+    if (!threads.length) {
+      list.innerHTML = '<div class="p-4 text-sm text-[var(--muted)]">ไม่พบ chat log<br><span class="text-xs">กด 🔄 เพื่อ rebuild ก่อน</span></div>';
+      return;
+    }
+    list.innerHTML = threads.map(t => {
+      const d = new Date(t.to).toLocaleDateString('th-TH', { day:'numeric', month:'short' });
+      return `<div class="chat-item px-4 py-3 cursor-pointer hover:bg-white/[0.05] transition" data-slug="${escapeHtml(t.slug)}">
+        <div class="flex items-center justify-between">
+          <span class="font-semibold text-sm">${escapeHtml(t.title)}</span>
+          <span class="text-xs text-[var(--muted)] mono">${t.count}</span>
+        </div>
+        <div class="text-xs text-[var(--muted)] mt-0.5">${d}</div>
+      </div>`;
+    }).join('');
+    list.querySelectorAll('.chat-item').forEach(el =>
+      el.addEventListener('click', () => openChat(el.dataset.slug, el))
+    );
+  } catch (e) {
+    list.innerHTML = `<div class="p-4 text-sm text-red-400">โหลดไม่ได้: ${e.message}</div>`;
+  }
+}
+
+async function openChat(slug, clickedEl) {
+  // Highlight selected
+  document.querySelectorAll('.chat-item').forEach(el =>
+    el.classList.toggle('bg-[var(--sky)]/10', el === clickedEl)
+  );
+
+  const header = document.querySelector('#chat-panel-header');
+  const body   = document.querySelector('#chat-panel-body');
+  header.innerHTML = '<span class="text-[var(--muted)] text-sm">กำลังโหลด…</span>';
+  body.innerHTML   = '';
+
+  try {
+    const d = await (await fetch(`/api/chatlog/${encodeURIComponent(slug)}`)).json();
+
+    header.innerHTML = `
+      <div class="min-w-0">
+        <div class="font-semibold truncate">${escapeHtml(d.title)}</div>
+        <div class="text-xs text-[var(--muted)] mt-0.5">${d.count} ข้อความ · ${
+          new Date(d.from).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})
+        } → ${
+          new Date(d.to).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})
+        }</div>
+      </div>`;
+
+    // Group by day
+    const days = new Map();
+    for (const m of d.messages) {
+      const day = new Date(m.time).toLocaleDateString('th-TH', {
+        weekday:'long', year:'numeric', month:'long', day:'numeric'
+      });
+      if (!days.has(day)) days.set(day, []);
+      days.get(day).push(m);
+    }
+
+    const html = [];
+    for (const [day, msgs] of days) {
+      html.push(`<div class="flex items-center gap-2 my-3">
+        <div class="flex-1 h-px bg-white/10"></div>
+        <span class="text-xs text-[var(--muted)] whitespace-nowrap">${day}</span>
+        <div class="flex-1 h-px bg-white/10"></div>
+      </div>`);
+      for (const m of msgs) {
+        const isMe = m.side === 'me';
+        const time = new Date(m.time).toLocaleTimeString('th-TH', { hour:'2-digit', minute:'2-digit' });
+        const name = isMe ? 'ฉัน' : (m.sender || 'เขา');
+        html.push(`<div class="flex ${isMe ? 'justify-end' : 'justify-start'} gap-2 items-end">
+          <div class="max-w-[75%] ${isMe
+            ? 'bg-[var(--sky)]/20 rounded-2xl rounded-br-sm'
+            : 'bg-white/[0.06] rounded-2xl rounded-bl-sm'
+          } px-3 py-2">
+            ${!isMe ? `<div class="text-[10px] font-semibold text-[var(--sky)] mb-1">${escapeHtml(name)}</div>` : ''}
+            <div class="text-sm leading-relaxed break-words">${escapeHtml(m.text)}</div>
+            <div class="text-[10px] text-[var(--muted)] mt-1 ${isMe ? 'text-right' : ''}">${time}</div>
+          </div>
+        </div>`);
+      }
+    }
+    body.innerHTML = html.join('');
+    // Scroll to bottom
+    body.scrollTop = body.scrollHeight;
+  } catch (e) {
+    header.innerHTML = `<span class="text-red-400 text-sm">โหลดไม่ได้: ${e.message}</span>`;
+  }
+}
+
+document.querySelector('#chat-rebuild')?.addEventListener('click', async () => {
+  const btn = document.querySelector('#chat-rebuild');
+  btn.textContent = '⏳';
+  btn.disabled = true;
+  try {
+    await fetch('/api/chatlog/rebuild', { method: 'POST' });
+    // Wait a moment then reload list
+    setTimeout(async () => {
+      window.__chatLoaded = false;
+      await loadChatList();
+      window.__chatLoaded = true;
+      btn.textContent = '🔄';
+      btn.disabled = false;
+    }, 3000);
+  } catch {
+    btn.textContent = '🔄';
+    btn.disabled = false;
+  }
+});
 </script>
 </body>
 </html>

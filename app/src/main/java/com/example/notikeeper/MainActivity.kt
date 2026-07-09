@@ -16,15 +16,22 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
@@ -36,7 +43,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -163,31 +174,212 @@ fun authenticate(activity: FragmentActivity, onSuccess: () -> Unit) {
     prompt.authenticate(info)
 }
 
-private enum class Screen { List, Backup, Dashboard }
+private enum class Screen(val label: String, val icon: String) {
+    Feed("Feed", "◆"),
+    Threads("Threads", "◇"),
+    Dashboard("Dashboard", "▤"),
+    Settings("ตั้งค่า", "⚙")
+}
 
 @Composable
 fun AppScreen() {
-    var screen by remember { mutableStateOf(Screen.List) }
-    when (screen) {
-        Screen.Backup    -> BackupScreen(onClose = { screen = Screen.List })
-        Screen.Dashboard -> DashboardScreen(onClose = { screen = Screen.List })
-        Screen.List      -> MainList(
-            onOpenBackup    = { screen = Screen.Backup },
-            onOpenDashboard = { screen = Screen.Dashboard }
-        )
+    var screen by remember { mutableStateOf(Screen.Feed) }
+    Scaffold(
+        bottomBar = {
+            NavigationBar {
+                Screen.values().forEach { s ->
+                    NavigationBarItem(
+                        selected = screen == s,
+                        onClick = { screen = s },
+                        icon = { Text(s.icon) },
+                        label = { Text(s.label) }
+                    )
+                }
+            }
+        }
+    ) { padding ->
+        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+            when (screen) {
+                Screen.Feed      -> FeedScreen(onNavigateToSettings = { screen = Screen.Settings })
+                Screen.Threads   -> ThreadsScreen()
+                Screen.Dashboard -> DashboardScreen()
+                Screen.Settings  -> BackupScreen()
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThreadsScreen() {
+    var selected by remember { mutableStateOf<NotiStore.ThreadSummary?>(null) }
+    val sel = selected
+    if (sel == null) {
+        ThreadsListScreen(onOpen = { selected = it })
+    } else {
+        ThreadDetailScreen(thread = sel, onClose = { selected = null })
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainList(onOpenBackup: () -> Unit, onOpenDashboard: () -> Unit) {
+private fun ThreadsListScreen(onOpen: (NotiStore.ThreadSummary) -> Unit) {
+    val ctx = LocalContext.current
+    var threads by remember { mutableStateOf(emptyList<NotiStore.ThreadSummary>()) }
+    var refreshKey by remember { mutableStateOf(0) }
+    LaunchedEffect(refreshKey) {
+        threads = withContext(Dispatchers.IO) { NotiStore.get(ctx).listThreads() }
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("การสนทนา") },
+                actions = { TextButton(onClick = { refreshKey++ }) { Text("รีเฟรช") } }
+            )
+        }
+    ) { padding ->
+        if (threads.isEmpty()) {
+            Box(
+                modifier = Modifier.padding(padding).fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("ยังไม่มีบทสนทนาที่บันทึกไว้", color = Color.Gray)
+            }
+        } else {
+            LazyColumn(modifier = Modifier.padding(padding).fillMaxSize()) {
+                items(threads) { t -> ThreadRow(t, onClick = { onOpen(t) }) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ThreadRow(t: NotiStore.ThreadSummary, onClick: () -> Unit) {
+    val formatter = remember { SimpleDateFormat("dd/MM/yy HH:mm", Locale.getDefault()) }
+    Card(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(t.title.trim().take(1).ifBlank { "?" }.uppercase(), fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        t.title,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    Text(formatter.format(Date(t.lastTime)), style = MaterialTheme.typography.labelSmall)
+                }
+                Text(t.appName, style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                if (t.lastText.isNotBlank()) {
+                    Text(t.lastText, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Text(t.count.toString(), color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ThreadDetailScreen(thread: NotiStore.ThreadSummary, onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    var messages by remember { mutableStateOf(emptyList<NotiItem>()) }
+    LaunchedEffect(thread) {
+        messages = withContext(Dispatchers.IO) { NotiStore.get(ctx).threadMessages(thread.pkg, thread.title) }
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(thread.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(thread.appName, style = MaterialTheme.typography.labelSmall)
+                    }
+                },
+                navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } }
+            )
+        }
+    ) { padding ->
+        if (messages.isEmpty()) {
+            Box(modifier = Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("กำลังโหลด...", color = Color.Gray)
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .padding(padding)
+                    .fillMaxSize()
+                    .padding(horizontal = 8.dp),
+                reverseLayout = true
+            ) {
+                items(messages) { m -> MessageBubble(m) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessageBubble(item: NotiItem) {
+    val formatter = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val isMe = item.side == "me"
+    val bubbleColor = if (isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+    val textColor = if (isMe) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 280.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(bubbleColor)
+                .padding(horizontal = 12.dp, vertical = 8.dp)
+        ) {
+            if (item.text.isNotBlank()) {
+                Text(item.text, color = textColor)
+            }
+            Text(
+                formatter.format(Date(item.postTime)),
+                style = MaterialTheme.typography.labelSmall,
+                color = textColor.copy(alpha = 0.7f),
+                modifier = Modifier.align(if (isMe) Alignment.End else Alignment.Start)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FeedScreen(onNavigateToSettings: () -> Unit) {
     val ctx = LocalContext.current
     var query by remember { mutableStateOf("") }
     var items by remember { mutableStateOf(emptyList<NotiItem>()) }
+    var selectedApp by remember { mutableStateOf<String?>(null) }
     var notiOn by remember { mutableStateOf(isNotiAccessEnabled(ctx)) }
     var readerOn by remember { mutableStateOf(isReaderEnabled(ctx)) }
     var refreshKey by remember { mutableStateOf(0) }
     var updateAvail by remember { mutableStateOf<UpdateInfo?>(null) }
+    val appNames = remember(items) { items.map { it.appName }.distinct().sorted() }
+    val filteredItems = remember(items, selectedApp) {
+        selectedApp?.let { app -> items.filter { it.appName == app } } ?: items
+    }
 
     LaunchedEffect(query, refreshKey) {
         items = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(query) }
@@ -231,8 +423,6 @@ fun MainList(onOpenBackup: () -> Unit, onOpenDashboard: () -> Unit) {
             TopAppBar(
                 title = { Text("NotiKeeper") },
                 actions = {
-                    TextButton(onClick = onOpenDashboard) { Text("Dashboard") }
-                    TextButton(onClick = onOpenBackup) { Text("สำรอง") }
                     TextButton(onClick = { refreshKey++ }) { Text("รีเฟรช") }
                     TextButton(onClick = {
                         NotiStore.get(ctx).clear()
@@ -260,7 +450,7 @@ fun MainList(onOpenBackup: () -> Unit, onOpenDashboard: () -> Unit) {
                             Text(info.notes, style = MaterialTheme.typography.bodySmall)
                         }
                         Spacer(Modifier.height(8.dp))
-                        Button(onClick = onOpenBackup) { Text("ไปอัปเดต") }
+                        Button(onClick = onNavigateToSettings) { Text("ไปอัปเดต") }
                     }
                 }
             }
@@ -280,6 +470,28 @@ fun MainList(onOpenBackup: () -> Unit, onOpenDashboard: () -> Unit) {
                     onClick = { ctx.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)) }
                 )
             }
+            if (appNames.isNotEmpty()) {
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
+                    modifier = Modifier.padding(bottom = 6.dp)
+                ) {
+                    item {
+                        FilterChip(
+                            selected = selectedApp == null,
+                            onClick = { selectedApp = null },
+                            label = { Text("ทั้งหมด") }
+                        )
+                    }
+                    items(appNames) { name ->
+                        FilterChip(
+                            selected = selectedApp == name,
+                            onClick = { selectedApp = if (selectedApp == name) null else name },
+                            label = { Text(name) }
+                        )
+                    }
+                }
+            }
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -290,74 +502,97 @@ fun MainList(onOpenBackup: () -> Unit, onOpenDashboard: () -> Unit) {
                     .padding(12.dp)
             )
             LazyColumn(modifier = Modifier.fillMaxSize()) {
-                items(items) { item -> NotiRow(item) }
+                items(filteredItems) { item -> NotiRow(item) }
             }
         }
     }
 }
 
+private enum class SettingsPage { Menu, Capture, ReadAloud, Sync, About }
+
+@Composable
+fun BackupScreen() {
+    var page by remember { mutableStateOf(SettingsPage.Menu) }
+    when (page) {
+        SettingsPage.Menu      -> SettingsMenu(onOpen = { page = it })
+        SettingsPage.Capture   -> CaptureFilterScreen(onClose = { page = SettingsPage.Menu })
+        SettingsPage.ReadAloud -> ReadAloudScreen(onClose = { page = SettingsPage.Menu })
+        SettingsPage.Sync      -> SyncBackupScreen(onClose = { page = SettingsPage.Menu })
+        SettingsPage.About     -> AboutUpdateScreen(onClose = { page = SettingsPage.Menu })
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BackupScreen(onClose: () -> Unit) {
+private fun SettingsMenu(onOpen: (SettingsPage) -> Unit) {
     val ctx = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var apiUrl by remember { mutableStateOf(Settings.getApiUrl(ctx)) }
-    var apiToken by remember { mutableStateOf(Settings.getApiToken(ctx)) }
-    var auto by remember { mutableStateOf(Settings.getAutoUpload(ctx)) }
-    var status by remember { mutableStateOf("") }
+    val captureCount = remember { Settings.getCaptureApps(ctx).size }
+    val readAloudOn = remember { Settings.getReadAloudNoti(ctx) || Settings.getReadAloudScreen(ctx) }
+    val apiUrl = remember { Settings.getApiUrl(ctx) }
+    Scaffold(topBar = { TopAppBar(title = { Text("ตั้งค่า") }) }) { padding ->
+        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            SettingsRow(
+                title = "ตัวกรองการบันทึก",
+                subtitle = if (captureCount == 0) "บันทึกทุกแอป" else "$captureCount แอปที่เลือกไว้",
+                onClick = { onOpen(SettingsPage.Capture) }
+            )
+            SettingsRow(
+                title = "อ่านออกเสียง",
+                subtitle = if (readAloudOn) "เปิดอยู่" else "ปิดอยู่",
+                onClick = { onOpen(SettingsPage.ReadAloud) }
+            )
+            SettingsRow(
+                title = "ซิงค์ & สำรองข้อมูล",
+                subtitle = apiUrl.ifBlank { "ยังไม่ได้เชื่อมต่อ" },
+                onClick = { onOpen(SettingsPage.Sync) }
+            )
+            SettingsRow(
+                title = "เกี่ยวกับ / อัปเดต",
+                subtitle = "v${BuildConfig.VERSION_NAME}",
+                onClick = { onOpen(SettingsPage.About) }
+            )
+        }
+    }
+}
 
-    // QR pairing — opens ZXing scanner; the QR payload from the PC dashboard is
-    // either plain URL or JSON {endpoint, token, updateUrl}.
-    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        val raw = result.contents ?: return@rememberLauncherForActivityResult
-        var endpoint: String? = null
-        var token: String? = null
-        var update: String? = null
-        runCatching {
-            val o = JSONObject(raw)
-            endpoint = o.optString("endpoint").takeIf { it.isNotBlank() }
-            token = o.optString("token").takeIf { it.isNotBlank() }
-            update = o.optString("updateUrl").takeIf { it.isNotBlank() }
+@Composable
+private fun SettingsRow(title: String, subtitle: String, onClick: () -> Unit) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, fontWeight = FontWeight.Bold)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Text("›", style = MaterialTheme.typography.titleLarge, color = Color.Gray)
         }
-        if (endpoint == null && raw.startsWith("http")) endpoint = raw.trim()
-        if (endpoint != null) {
-            apiUrl = endpoint!!
-            Settings.setApiUrl(ctx, endpoint!!)
-            if (token != null) { apiToken = token!!; Settings.setApiToken(ctx, token!!) }
-            if (update != null) { Settings.setUpdateUrl(ctx, update!!) }
-            status = "ตั้งค่าเสร็จ — endpoint: $endpoint"
-            Toast.makeText(ctx, "Pair สำเร็จ", Toast.LENGTH_SHORT).show()
-        } else {
-            status = "QR ไม่ถูกฟอร์แมต"
-        }
+        HorizontalDivider()
     }
-    var readNoti by remember { mutableStateOf(Settings.getReadAloudNoti(ctx)) }
-    var readScreen by remember { mutableStateOf(Settings.getReadAloudScreen(ctx)) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CaptureFilterScreen(onClose: () -> Unit) {
+    val ctx = LocalContext.current
     var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
-    var appFilter by remember { mutableStateOf("") }
     var captureFilter by remember { mutableStateOf("") }
-    var speakApps by remember { mutableStateOf(Settings.getSpeakApps(ctx)) }
     var captureApps by remember { mutableStateOf(Settings.getCaptureApps(ctx)) }
-    var updateUrl by remember { mutableStateOf(Settings.getUpdateUrl(ctx)) }
-    var updateStatus by remember { mutableStateOf("") }
     LaunchedEffect(Unit) {
-        apps = withContext(Dispatchers.IO) {
-            InstalledApps.scan(ctx, NotiStore.get(ctx).distinctApps())
-        }
-    }
-    val filteredApps = remember(apps, appFilter) {
-        if (appFilter.isBlank()) apps
-        else apps.filter { it.label.contains(appFilter, ignoreCase = true) || it.pkg.contains(appFilter, ignoreCase = true) }
+        apps = withContext(Dispatchers.IO) { InstalledApps.scan(ctx, NotiStore.get(ctx).distinctApps()) }
     }
     val filteredCaptureApps = remember(apps, captureFilter) {
         if (captureFilter.isBlank()) apps
         else apps.filter { it.label.contains(captureFilter, ignoreCase = true) || it.pkg.contains(captureFilter, ignoreCase = true) }
     }
-
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("สำรอง / ส่งออกข้อมูล") },
+                title = { Text("ตัวกรองการบันทึก") },
                 navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } }
             )
         }
@@ -369,10 +604,9 @@ fun BackupScreen(onClose: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
-            // ───── Capture whitelist ─────
             Text("เลือกแอปที่จะบันทึก", fontWeight = FontWeight.Bold)
             Text(
-                "ไม่เลือกอะไรเลย = บันทึกทุกแอป (ค่าเริ่มต้น)  ·  ตอนนี้เลือกอยู่ ${captureApps.size} แอป",
+                "ค่าเริ่มต้น: LINE, Messenger, WhatsApp, Telegram  ·  ไม่เลือกอะไรเลย = บันทึกทุกแอป  ·  ตอนนี้เลือกอยู่ ${captureApps.size} แอป",
                 style = MaterialTheme.typography.bodySmall
             )
             Spacer(Modifier.height(6.dp))
@@ -407,48 +641,41 @@ fun BackupScreen(onClose: () -> Unit) {
                     Text("ไม่พบแอปที่ตรง", style = MaterialTheme.typography.bodySmall)
                 }
             }
+        }
+    }
+}
 
-            Spacer(Modifier.height(24.dp))
-            Text("อัปเดตแอป", fontWeight = FontWeight.Bold)
-            Text(
-                "เวอร์ชันปัจจุบัน: ${BuildConfig.VERSION_NAME}",
-                style = MaterialTheme.typography.bodySmall
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReadAloudScreen(onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    var readNoti by remember { mutableStateOf(Settings.getReadAloudNoti(ctx)) }
+    var readScreen by remember { mutableStateOf(Settings.getReadAloudScreen(ctx)) }
+    var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
+    var appFilter by remember { mutableStateOf("") }
+    var speakApps by remember { mutableStateOf(Settings.getSpeakApps(ctx)) }
+    LaunchedEffect(Unit) {
+        apps = withContext(Dispatchers.IO) { InstalledApps.scan(ctx, NotiStore.get(ctx).distinctApps()) }
+    }
+    val filteredApps = remember(apps, appFilter) {
+        if (appFilter.isBlank()) apps
+        else apps.filter { it.label.contains(appFilter, ignoreCase = true) || it.pkg.contains(appFilter, ignoreCase = true) }
+    }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("อ่านออกเสียง") },
+                navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } }
             )
-            Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = updateUrl,
-                onValueChange = { updateUrl = it; Settings.setUpdateUrl(ctx, it) },
-                label = { Text("URL ตรวจอัปเดต (version.json)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    scope.launch {
-                        updateStatus = "กำลังตรวจ..."
-                        runCatching {
-                            val info = Updater.check(ctx)
-                            if (info == null) {
-                                updateStatus = "เป็นเวอร์ชันล่าสุดแล้ว (${BuildConfig.VERSION_NAME})"
-                            } else {
-                                updateStatus = "พบเวอร์ชัน ${info.versionName} — กำลังดาวน์โหลด..."
-                                val f = Updater.download(ctx, info.apkUrl)
-                                updateStatus = "กำลังเปิดตัวติดตั้ง..."
-                                Updater.install(ctx, f)
-                            }
-                        }.onFailure { updateStatus = "ผิดพลาด: ${it.message}" }
-                    }
-                },
-                enabled = updateUrl.isNotBlank(),
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("ตรวจ & อัปเดตตอนนี้") }
-            if (updateStatus.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                Text(updateStatus, style = MaterialTheme.typography.bodySmall)
-            }
-
-            Spacer(Modifier.height(24.dp))
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
             Text("อ่านออกเสียง (สำหรับขับรถ)", fontWeight = FontWeight.Bold)
             Text(
                 "ให้เครื่องอ่านข้อความออกเสียงผ่านหูฟัง ไม่ต้องมองจอ — เพลงจะหรี่ลงตอนพูดแล้วดังกลับ",
@@ -509,8 +736,67 @@ fun BackupScreen(onClose: () -> Unit) {
                     Text("ไม่พบแอปที่ตรง", style = MaterialTheme.typography.bodySmall)
                 }
             }
+        }
+    }
+}
 
-            Spacer(Modifier.height(24.dp))
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SyncBackupScreen(onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var apiUrl by remember { mutableStateOf(Settings.getApiUrl(ctx)) }
+    var apiToken by remember { mutableStateOf(Settings.getApiToken(ctx)) }
+    var auto by remember { mutableStateOf(Settings.getAutoUpload(ctx)) }
+    var status by remember { mutableStateOf("") }
+
+    // QR pairing — opens ZXing scanner; the QR payload from the PC dashboard is
+    // either plain URL or JSON {endpoint, token, updateUrl}.
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        val raw = result.contents ?: return@rememberLauncherForActivityResult
+        var endpoint: String? = null
+        var token: String? = null
+        var update: String? = null
+        var capturePkgs: Set<String>? = null
+        runCatching {
+            val o = JSONObject(raw)
+            endpoint = o.optString("endpoint").takeIf { it.isNotBlank() }
+            token = o.optString("token").takeIf { it.isNotBlank() }
+            update = o.optString("updateUrl").takeIf { it.isNotBlank() }
+            o.optJSONArray("captureApps")?.let { arr ->
+                capturePkgs = (0 until arr.length()).map { arr.getString(it) }.toSet()
+            }
+        }
+        if (endpoint == null && raw.startsWith("http")) endpoint = raw.trim()
+        if (endpoint != null) {
+            apiUrl = endpoint!!
+            Settings.setApiUrl(ctx, endpoint!!)
+            if (token != null) { apiToken = token!!; Settings.setApiToken(ctx, token!!) }
+            if (update != null) { Settings.setUpdateUrl(ctx, update!!) }
+            capturePkgs?.let { Settings.setCaptureApps(ctx, it) }
+            status = "ตั้งค่าเสร็จ — endpoint: $endpoint" +
+                (capturePkgs?.let { " · ตัวกรองการบันทึก ${it.size} แอปจาก PC" } ?: "")
+            Toast.makeText(ctx, "Pair สำเร็จ", Toast.LENGTH_SHORT).show()
+        } else {
+            status = "QR ไม่ถูกฟอร์แมต"
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("ซิงค์ & สำรองข้อมูล") },
+                navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
             Text("ส่งออกเป็นไฟล์", fontWeight = FontWeight.Bold)
             Text(
                 "แชร์ไปได้ทุกที่: Google Drive, อีเมล, Nearby, ส่งเข้าคอม ฯลฯ",
@@ -626,7 +912,71 @@ fun BackupScreen(onClose: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DashboardScreen(onClose: () -> Unit) {
+private fun AboutUpdateScreen(onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var updateUrl by remember { mutableStateOf(Settings.getUpdateUrl(ctx)) }
+    var updateStatus by remember { mutableStateOf("") }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("เกี่ยวกับ / อัปเดต") },
+                navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            Text("อัปเดตแอป", fontWeight = FontWeight.Bold)
+            Text(
+                "เวอร์ชันปัจจุบัน: ${BuildConfig.VERSION_NAME}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = updateUrl,
+                onValueChange = { updateUrl = it; Settings.setUpdateUrl(ctx, it) },
+                label = { Text("URL ตรวจอัปเดต (version.json)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    scope.launch {
+                        updateStatus = "กำลังตรวจ..."
+                        runCatching {
+                            val info = Updater.check(ctx)
+                            if (info == null) {
+                                updateStatus = "เป็นเวอร์ชันล่าสุดแล้ว (${BuildConfig.VERSION_NAME})"
+                            } else {
+                                updateStatus = "พบเวอร์ชัน ${info.versionName} — กำลังดาวน์โหลด..."
+                                val f = Updater.download(ctx, info.apkUrl)
+                                updateStatus = "กำลังเปิดตัวติดตั้ง..."
+                                Updater.install(ctx, f)
+                            }
+                        }.onFailure { updateStatus = "ผิดพลาด: ${it.message}" }
+                    }
+                },
+                enabled = updateUrl.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("ตรวจ & อัปเดตตอนนี้") }
+            if (updateStatus.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(updateStatus, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DashboardScreen() {
     val ctx = LocalContext.current
     var stats by remember { mutableStateOf<com.example.notikeeper.data.NotiStore.Stats?>(null) }
     var refresh by remember { mutableStateOf(0) }
@@ -641,7 +991,6 @@ fun DashboardScreen(onClose: () -> Unit) {
         topBar = {
             TopAppBar(
                 title = { Text("Dashboard") },
-                navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } },
                 actions = { TextButton(onClick = { refresh++ }) { Text("รีเฟรช") } }
             )
         }
