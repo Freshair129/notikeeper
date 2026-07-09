@@ -13,6 +13,35 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.1.4] — 2026-07-09
+### Changed
+- `versionName` now follows standard `x.y.z` SemVer (was `x.y`, e.g. `1.13`).
+  `versionCode` is unaffected — it's what the updater actually compares.
+
+### Fixed
+- **Thread-title chrome leak**: `MessengerReaderService` picked the topmost
+  line in the app-bar band as the conversation title without checking it
+  against the same chrome denylist used for message content, so a transient
+  nav label ("Back", "Drive") could become the title for a whole capture
+  batch — and `rebuild-chatlog.mjs` correctly rejects chrome titles, taking
+  the real messages under them down too. Title candidates are now filtered
+  against the denylist, and the service remembers the last real title per
+  app as a fallback when a tick's top band has nothing but chrome. See
+  `docs/rca/2026-07-09-thread-title-chrome-leak.md`.
+
+### Added
+- `rebuild-chatlog.mjs` now covers every captured chat app (Messenger,
+  Facebook, Instagram, WhatsApp, LINE, Telegram), grouped by (app, title)
+  so same-named contacts across apps don't collide — previously Messenger-only.
+- **Exact-duplicate cleanup** on the server: some notifications (spam/promo
+  channels especially) repost identical text repeatedly with a new
+  timestamp each time, bypassing the id+time dedup key at ingest. A new
+  `dedupCleanup()` removes exact (pkg, title, side, text) duplicates down to
+  one copy — never a fuzzy match, so it can't merge two different real
+  messages — runs once at startup and hourly thereafter. Every removed row
+  is archived to `dedup-removed.jsonl` first, so nothing is ever
+  unrecoverably deleted. Manual trigger: `POST /api/dedup/rebuild`.
+
 ## [1.13] — 2026-07-09
 ### Fixed
 - **QR pairing scan loop**: launching the QR scanner (or the notification/

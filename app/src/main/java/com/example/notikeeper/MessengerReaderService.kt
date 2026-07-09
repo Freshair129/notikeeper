@@ -48,8 +48,14 @@ class MessengerReaderService : AccessibilityService() {
     /** Obvious UI chrome we don't want to archive as "messages" (belt-and-suspenders; see [chromeClasses]). */
     private val chrome = setOf(
         "Aa", "GIF", "Open Photos", "Camera", "Voice message", "Send",
-        "Active now", "Message", "Home", "Chats", "Menu", "Back", "Search"
+        "Active now", "Message", "Home", "Chats", "Menu", "Back", "Search",
+        "ย้อนกลับ", "หน้าแรก", "เมนู", "ค้นหา"
     )
+
+    /** Last known-good conversation name per package, so a single bad capture
+     *  tick (top band showing only chrome) doesn't mislabel real messages —
+     *  see docs/rca/2026-07-09-thread-title-chrome-leak.md. */
+    private val lastGoodConvo = HashMap<String, String>()
 
     /** Widget classes that are always controls, never message content — locale independent. */
     private val chromeClasses = setOf(
@@ -87,8 +93,15 @@ class MessengerReaderService : AccessibilityService() {
         }
         if (lines.isEmpty()) return
 
-        // Conversation/contact name = the top-most short line in the app bar area.
-        val convo = lines.filter { it.top < 350 }.minByOrNull { it.top }?.text ?: "Messenger"
+        // Conversation/contact name = the top-most non-chrome line in the app bar area.
+        // Chrome (nav labels, icon-button descriptions) can transiently be the only
+        // thing in that band — fall back to the last real title seen for this app
+        // rather than mislabeling a whole batch of real messages as "Back"/"Menu"/etc.
+        val candidateConvo = lines
+            .filter { it.top < 350 && it.text !in chrome }
+            .minByOrNull { it.top }?.text
+        val convo = candidateConvo ?: lastGoodConvo[pkg] ?: "Messenger"
+        if (candidateConvo != null) lastGoodConvo[pkg] = candidateConvo
 
         val bottomBand = resources.displayMetrics.heightPixels * 0.88
         val fresh = ArrayList<ScreenRow>()

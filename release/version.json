@@ -1,6 +1,6 @@
 ﻿{
-  "versionCode": 14,
-  "versionName": "1.13",
+  "versionCode": 15,
+  "versionName": "1.1.4",
   "url": "https://github.com/Freshair129/notikeeper/releases/latest/download/NotiKeeper.apk",
-  "notes": "NotiKeeper 1.13 — แก้บั๊กสำคัญ: สแกน QR จับคู่มือถือแล้วเด้งขอรหัสวนไม่รู้จบ (ตอนนี้สแกนแล้วจับคู่ได้จริง) + หน้าจอใหม่ ตั้งค่า > อุปกรณ์และการเชื่อมต่อ (ตั้งชื่อเครื่อง, เห็นสถานะเชื่อมต่อ, ตัวกรองแอปที่ใช้อยู่) + bottom nav ใหม่ (Feed/Threads/Dashboard/Settings) + ค่าเริ่มต้นบันทึกเฉพาะ LINE/Messenger/WhatsApp/Telegram + รองรับ dark/light theme ตามเครื่อง"
+  "notes": "NotiKeeper 1.1.4 — เปลี่ยนรูปแบบเลขเวอร์ชันเป็น x.y.z มาตรฐาน + แก้บั๊กจับชื่อคู่สนทนาผิด (เคยได้ 'Back'/'Drive' แทนชื่อจริง ทำให้ข้อความจริงถูกกรองทิ้งไปด้วย) + rebuild-chatlog ครอบคลุมทุกแอปแชตแล้ว ไม่ใช่แค่ Messenger + เพิ่มระบบลบข้อความซ้ำซากอัตโนมัติฝั่ง server (เช่นสแปมที่ส่งข้อความเดิมซ้ำๆ) ลบเฉพาะข้อความที่ตรงกันเป๊ะเท่านั้น เก็บ log ทุกอันที่ลบไว้กู้คืนได้ รันทุก 1 ชม."
 }

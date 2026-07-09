@@ -104,6 +104,70 @@ function rebuildRelations() {
 }
 rebuildRelations();
 
+// ---------- exact-duplicate cleanup ----------
+// Some notifications (spam/promo channels especially) repost the exact same
+// text over and over with a new timestamp each time, so the id+time dedup key
+// in ingest() never catches them. This removes exact (pkg, title, side, text)
+// duplicates down to one copy — never a fuzzy/heuristic match, so it can't
+// mistake two different real messages for the same spam blast. Nothing is
+// ever hard-deleted: every removed row is archived to DEDUP_LOG_FILE first,
+// so this is always reversible.
+const DEDUP_LOG_FILE = path.join(__dirname, "dedup-removed.jsonl");
+const DEDUP_SRC_PRIORITY = { scrape: 1, noti: 2, screen: 3 };
+const dedupSrcPri = (s) => DEDUP_SRC_PRIORITY[s] ?? 4;
+
+function dedupCleanup() {
+  const groups = new Map();
+  for (const r of rows) {
+    const key = `${r.pkg || ""}|${r.title || ""}|${r.side || ""}|${r.text || ""}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+
+  const toRemove = new Set(); // keyOf(r) for rows being dropped
+  let groupsAffected = 0;
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    groupsAffected++;
+    // Keep the best copy: prefer scrape > noti > screen, then earliest time.
+    const sorted = [...group].sort(
+      (a, b) => dedupSrcPri(a.source) - dedupSrcPri(b.source) || a.time - b.time
+    );
+    for (const r of sorted.slice(1)) toRemove.add(keyOf(r));
+  }
+  if (toRemove.size === 0) return { removed: 0, groups: 0 };
+
+  const removedRows = rows.filter((r) => toRemove.has(keyOf(r)));
+  const keptRows = rows.filter((r) => !toRemove.has(keyOf(r)));
+
+  // Archive BEFORE touching the active store — the log is the undo path.
+  const archiveLines = removedRows
+    .map((r) => JSON.stringify({ ...r, _dedup_removed_at: Date.now() }))
+    .join("\n") + "\n";
+  fs.appendFileSync(DEDUP_LOG_FILE, archiveLines);
+
+  rows.length = 0;
+  rows.push(...keptRows);
+  seen.clear();
+  for (const r of rows) seen.add(keyOf(r));
+  fs.writeFileSync(DATA_FILE, keptRows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+
+  // Note: this does not retroactively purge the already-inserted rows from
+  // relations.db (reindex() is insert-only) — Threads/Graph tabs may still
+  // show the old duplicates until that layer gets a real delete path.
+  try { rebuildRelations(); } catch (e) { console.error("[dedup] relations resync failed:", e.message); }
+
+  console.error(
+    `[dedup] removed ${removedRows.length} exact-duplicate rows across ${groupsAffected} groups ` +
+    `(archived to ${path.basename(DEDUP_LOG_FILE)})`
+  );
+  broadcast("dedup", { removed: removedRows.length, groups: groupsAffected, total: rows.length });
+  return { removed: removedRows.length, groups: groupsAffected };
+}
+
+dedupCleanup(); // once at startup
+setInterval(dedupCleanup, 60 * 60 * 1000); // then hourly
+
 /** Return the first private-LAN IPv4 address (e.g. 192.168.x.x or 10.x), skipping
  *  loopback, link-local, and the noisy 172.x ranges used by WSL/Hyper-V. */
 function getLanIp() {
@@ -398,6 +462,13 @@ const httpServer = http.createServer((req, res) => {
     const r = rebuildRelations();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(r));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/dedup/rebuild") {
+    const r = dedupCleanup();
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: true, ...r }));
     return;
   }
 

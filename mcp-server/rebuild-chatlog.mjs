@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 /**
- * Rebuilds a clean Messenger chat log from data.jsonl.
+ * Rebuilds a clean chat log from data.jsonl, across every chat app the phone
+ * captures (Messenger, Facebook, Instagram, WhatsApp, LINE, Telegram — see
+ * CHAT_APPS below). The noise filters were written against Messenger/Facebook
+ * UI vocabulary, so they're a solid baseline everywhere but least precise on
+ * apps that weren't the original target.
  *
  * Strategy:
- *   1. Read all rows where app = "Messenger"
+ *   1. Read all rows whose app is in CHAT_APPS
  *   2. Filter threads whose title looks like a real person/group name
- *      (discard obvious Messenger UI labels: "Open the home page", etc.)
- *   3. Within each thread, filter messages through a Messenger chrome list
- *      + the existing noise filter; keep only messages that look like real text
+ *      (discard obvious chrome labels: "Open the home page", etc.)
+ *   3. Within each (app, thread) group, filter messages through a chrome
+ *      list + the existing noise filter; keep only messages that look real
  *   4. Deduplicate (same text+side within 5-second window)
  *   5. Sort chronologically and write one .txt file per thread under chatlog/
  *
@@ -331,7 +335,15 @@ function main() {
     process.exit(1);
   }
 
-  // Read + parse all Messenger rows
+  // Read + parse rows from every chat app the phone captures (see
+  // MessengerReaderService.kt's `targets`) — not just Messenger. The noise
+  // filters below are Messenger/Facebook-vocabulary-heavy so they'll be less
+  // precise on Instagram/WhatsApp/LINE/Telegram until tuned per app, but
+  // running them beats silently dropping those apps' data entirely.
+  const CHAT_APPS = new Set([
+    "Messenger", "Messenger Lite", "Facebook", "Instagram",
+    "WhatsApp", "WhatsApp Business", "LINE", "Telegram", "Telegram X",
+  ]);
   console.error("[rebuild] Reading data.jsonl…");
   const all = [];
   for (const line of fs.readFileSync(DATA_FILE, "utf8").split("\n")) {
@@ -339,24 +351,27 @@ function main() {
     if (!t) continue;
     try {
       const r = JSON.parse(t);
-      if ((r.app || "").trim() === "Messenger") all.push(r);
+      if (CHAT_APPS.has((r.app || "").trim())) all.push(r);
     } catch { /* skip */ }
   }
-  console.error(`[rebuild] ${all.length} Messenger rows`);
+  console.error(`[rebuild] ${all.length} rows across ${new Set(all.map(r => r.app)).size} apps`);
 
-  // Group by thread title
+  // Group by (app, thread title) — same contact name in two different apps
+  // must not collapse into one thread.
   const byThread = new Map();
   for (const r of all) {
+    const app = (r.app || "").trim();
     const title = (r.title || "").trim();
-    if (!byThread.has(title)) byThread.set(title, []);
-    byThread.get(title).push(r);
+    const key = `${app} ${title}`;
+    if (!byThread.has(key)) byThread.set(key, { app, title, msgs: [] });
+    byThread.get(key).msgs.push(r);
   }
 
   // Filter and clean each thread
   const goodThreads = [];
   let totalDropped = 0;
 
-  for (const [title, msgs] of byThread.entries()) {
+  for (const { app, title, msgs } of byThread.values()) {
     if (isBadTitle(title)) { totalDropped += msgs.length; continue; }
 
     // Filter message content (skip screen source by default — too noisy)
@@ -372,7 +387,7 @@ function main() {
     const hasHighQuality = clean.some(m => m.source === "scrape" || m.source === "noti");
     if (!hasHighQuality) { totalDropped += msgs.length; continue; }
 
-    goodThreads.push({ title, msgs: deduped, raw: msgs.length });
+    goodThreads.push({ app, title, msgs: deduped, raw: msgs.length });
   }
 
   // Sort threads by most recent message
@@ -394,7 +409,7 @@ function main() {
   // Write output
   for (const thread of goodThreads) {
     const lines = [
-      `Thread: ${thread.title}`,
+      `Thread: ${thread.title} (${thread.app})`,
       `Messages: ${thread.msgs.length} (from ${thread.raw} raw)`,
       `Period : ${fmt(thread.msgs[0].time)} → ${fmt(thread.msgs.at(-1).time)}`,
       "─".repeat(60),
@@ -425,10 +440,11 @@ function main() {
       console.log("═".repeat(60));
       console.log("");
     } else {
-      const base  = safeName(thread.title);
+      const base = safeName(`${thread.app} ${thread.title}`);
       fs.writeFileSync(path.join(OUT_DIR, `${base}.txt`), content, "utf8");
       // JSON sidecar — consumed by dashboard /api/chatlog/:thread
       const json = {
+        app:      thread.app,
         title:    thread.title,
         count:    thread.msgs.length,
         raw:      thread.raw,
@@ -450,14 +466,15 @@ function main() {
     console.error(`[rebuild] ✓ Written to ${OUT_DIR}/`);
     console.error(`           ${goodThreads.length} files`);
     // Print summary table
-    console.error("\nThread                              msgs  period");
-    console.error("─".repeat(60));
+    console.error("\nApp          Thread                        msgs  period");
+    console.error("─".repeat(68));
     for (const t of goodThreads) {
-      const name = t.title.padEnd(34).slice(0, 34);
+      const app  = t.app.padEnd(11).slice(0, 11);
+      const name = t.title.padEnd(28).slice(0, 28);
       const cnt  = String(t.msgs.length).padStart(4);
       const from = new Date(t.msgs[0].time).toISOString().slice(0, 10);
       const to   = new Date(t.msgs.at(-1).time).toISOString().slice(0, 10);
-      console.error(`${name}  ${cnt}  ${from} → ${to}`);
+      console.error(`${app}  ${name}  ${cnt}  ${from} → ${to}`);
     }
   }
 }
