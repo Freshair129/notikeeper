@@ -34,6 +34,10 @@
           <span id="live-dot" class="w-1.5 h-1.5 rounded-full bg-[var(--muted)] pulse-dot"></span>
           <span id="live-label" class="text-[var(--muted)]">connecting…</span>
         </div>
+        <div id="device-pill" class="hidden ml-1 inline-flex items-center gap-2 text-xs px-2.5 py-1 rounded-full border border-white/10">
+          <span>📱</span>
+          <span id="device-label" class="text-white"></span>
+        </div>
       </div>
       <div class="flex items-center gap-3 text-xs">
         <span class="text-[var(--muted)]">รวม</span>
@@ -259,6 +263,19 @@
   </main>
 
 <script>
+// Every /api/* + /events request now requires NOTIKEEPER_TOKEN once it's set.
+// The server injects window.NK_TOKEN into this same-origin page automatically
+// (see server.mjs), so wrap fetch once here instead of touching every call site.
+const NK_TOKEN = window.NK_TOKEN || '';
+if (NK_TOKEN) {
+  const _fetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const headers = new Headers(init.headers || {});
+    headers.set('Authorization', `Bearer ${NK_TOKEN}`);
+    return _fetch(input, { ...init, headers });
+  };
+}
+
 const $ = (s) => document.querySelector(s);
 const rowsEl = $("#rows");
 const totalPill = $("#total-pill");
@@ -383,14 +400,29 @@ document.querySelectorAll('.claude-quick').forEach(btn => {
 });
 
 // SSE — push live updates when new ingest arrives
+// Last device seen at /ingest (sent via X-Device-Name header, synced through /api/config).
+async function loadDeviceInfo() {
+  try {
+    const cfg = await (await fetch('/api/config')).json();
+    const d = cfg.lastDevice;
+    const pill = $("#device-pill");
+    if (d && d.name) {
+      $("#device-label").textContent = `${d.name} · ${fmtTime(d.lastSeen)}`;
+      pill.classList.remove('hidden');
+    } else {
+      pill.classList.add('hidden');
+    }
+  } catch { /* dashboard still works without this */ }
+}
+
 function connectSSE() {
-  const es = new EventSource('/events');
+  const es = new EventSource(NK_TOKEN ? `/events?token=${encodeURIComponent(NK_TOKEN)}` : '/events');
   es.addEventListener('hello', () => {
     liveDot.className = 'w-1.5 h-1.5 rounded-full bg-[var(--sky)] pulse-dot';
     liveLabel.textContent = 'live';
     liveLabel.className = 'text-[var(--sky)]';
   });
-  es.addEventListener('new', () => loadAll());
+  es.addEventListener('new', () => { loadAll(); loadDeviceInfo(); });
   es.onerror = () => {
     liveDot.className = 'w-1.5 h-1.5 rounded-full bg-red-400';
     liveLabel.textContent = 'reconnecting…';
@@ -405,7 +437,7 @@ async function openPairModal() {
   const info = await (await fetch('/api/pair')).json();
   $("#pair-endpoint").textContent = info.endpoint;
   $("#pair-ip").textContent = `${info.ip}:${info.port}`;
-  $("#pair-qr").src = '/api/pair-qr?t=' + Date.now();
+  $("#pair-qr").src = '/api/pair-qr?t=' + Date.now() + (NK_TOKEN ? `&token=${encodeURIComponent(NK_TOKEN)}` : '');
   pairModal.classList.remove('hidden');
   renderCaptureAppsPicker();
 }
@@ -458,7 +490,7 @@ async function saveCaptureApps(pkgs) {
     body: JSON.stringify({ captureApps: pkgs }),
   });
   updateCaptureStatus(pkgs.length);
-  $("#pair-qr").src = '/api/pair-qr?t=' + Date.now(); // payload just changed
+  $("#pair-qr").src = '/api/pair-qr?t=' + Date.now() + (NK_TOKEN ? `&token=${encodeURIComponent(NK_TOKEN)}` : ''); // payload just changed
 }
 
 $("#capture-save").addEventListener('click', () => {
@@ -771,6 +803,7 @@ document.querySelector('#tl-day-close')?.addEventListener('click', () => {
 });
 
 loadAll();
+loadDeviceInfo();
 connectSSE();
 showTab('feed');
 

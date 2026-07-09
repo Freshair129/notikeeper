@@ -3,6 +3,7 @@ package com.example.notikeeper
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings as AndroidSettings
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -40,6 +41,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -56,7 +58,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -94,13 +95,24 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         val activity = this
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
+            NotiKeeperTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     AppRoot(activity)
                 }
             }
         }
     }
+}
+
+/**
+ * One-shot suppression for the re-lock-on-background check. Launching our own
+ * trusted sub-activity (QR scanner, share sheet) triggers the same ON_STOP as
+ * the user backgrounding the whole app — set this immediately before such a
+ * launch so AppRoot skips exactly one re-lock instead of tearing down the
+ * screen (and its pending activity-result callback) before the result arrives.
+ */
+object AppLock {
+    var suppressNextLock = false
 }
 
 /** Wraps the app in a biometric/PIN lock. Re-locks every time the app is backgrounded. */
@@ -111,7 +123,13 @@ fun AppRoot(activity: FragmentActivity) {
     val owner = LocalLifecycleOwner.current
     DisposableEffect(owner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) unlocked = false
+            if (event == Lifecycle.Event.ON_STOP) {
+                if (AppLock.suppressNextLock) {
+                    AppLock.suppressNextLock = false
+                } else {
+                    unlocked = false
+                }
+            }
         }
         owner.lifecycle.addObserver(observer)
         onDispose { owner.lifecycle.removeObserver(observer) }
@@ -242,7 +260,7 @@ private fun ThreadsListScreen(onOpen: (NotiStore.ThreadSummary) -> Unit) {
                 modifier = Modifier.padding(padding).fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                Text("ยังไม่มีบทสนทนาที่บันทึกไว้", color = Color.Gray)
+                Text("ยังไม่มีบทสนทนาที่บันทึกไว้", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             LazyColumn(modifier = Modifier.padding(padding).fillMaxSize()) {
@@ -283,13 +301,13 @@ private fun ThreadRow(t: NotiStore.ThreadSummary, onClick: () -> Unit) {
                     )
                     Text(formatter.format(Date(t.lastTime)), style = MaterialTheme.typography.labelSmall)
                 }
-                Text(t.appName, style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+                Text(t.appName, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 if (t.lastText.isNotBlank()) {
                     Text(t.lastText, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
                 }
             }
             Spacer(Modifier.width(8.dp))
-            Text(t.count.toString(), color = Color.Gray, style = MaterialTheme.typography.labelSmall)
+            Text(t.count.toString(), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -317,7 +335,7 @@ private fun ThreadDetailScreen(thread: NotiStore.ThreadSummary, onClose: () -> U
     ) { padding ->
         if (messages.isEmpty()) {
             Box(modifier = Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("กำลังโหลด...", color = Color.Gray)
+                Text("กำลังโหลด...", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             LazyColumn(
@@ -401,9 +419,11 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     Exporter.uploadJson(
                         Settings.getApiUrl(ctx),
                         Settings.getApiToken(ctx),
-                        Exporter.itemsToJson(fresh)
+                        Exporter.itemsToJson(fresh),
+                        Settings.getDeviceName(ctx).ifBlank { Build.MODEL }
                     )
                     Settings.setLastUploadedId(ctx, fresh.maxOf { it.id })
+                    Settings.setLastSyncTime(ctx, System.currentTimeMillis())
                 }
             }
         }
@@ -459,7 +479,10 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     title = "เปิดสิทธิ์ \"การเข้าถึงการแจ้งเตือน\"",
                     body = "เพื่อเก็บการแจ้งเตือนทุกแอปแบบเบื้องหลัง",
                     button = "เปิดสิทธิ์แจ้งเตือน",
-                    onClick = { ctx.startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                    onClick = {
+                        AppLock.suppressNextLock = true
+                        ctx.startActivity(Intent(AndroidSettings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                    }
                 )
             }
             if (!readerOn) {
@@ -467,7 +490,10 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     title = "เปิดสิทธิ์ \"การช่วยเหลือพิเศษ\" (Accessibility)",
                     body = "เพื่ออ่านบทสนทนาเต็ม ๆ บนหน้าจอแชท (Messenger/LINE/IG/WhatsApp/Telegram) — เปิด NotiKeeper ในรายการ",
                     button = "เปิดสิทธิ์อ่านหน้าจอ",
-                    onClick = { ctx.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                    onClick = {
+                        AppLock.suppressNextLock = true
+                        ctx.startActivity(Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS))
+                    }
                 )
             }
             if (appNames.isNotEmpty()) {
@@ -508,7 +534,7 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
     }
 }
 
-private enum class SettingsPage { Menu, Capture, ReadAloud, Sync, About }
+private enum class SettingsPage { Menu, Capture, ReadAloud, Device, Sync, About }
 
 @Composable
 fun BackupScreen() {
@@ -517,7 +543,8 @@ fun BackupScreen() {
         SettingsPage.Menu      -> SettingsMenu(onOpen = { page = it })
         SettingsPage.Capture   -> CaptureFilterScreen(onClose = { page = SettingsPage.Menu })
         SettingsPage.ReadAloud -> ReadAloudScreen(onClose = { page = SettingsPage.Menu })
-        SettingsPage.Sync      -> SyncBackupScreen(onClose = { page = SettingsPage.Menu })
+        SettingsPage.Device    -> DeviceConnectionScreen(onClose = { page = SettingsPage.Menu })
+        SettingsPage.Sync      -> BackupExportScreen(onClose = { page = SettingsPage.Menu })
         SettingsPage.About     -> AboutUpdateScreen(onClose = { page = SettingsPage.Menu })
     }
 }
@@ -542,8 +569,13 @@ private fun SettingsMenu(onOpen: (SettingsPage) -> Unit) {
                 onClick = { onOpen(SettingsPage.ReadAloud) }
             )
             SettingsRow(
-                title = "ซิงค์ & สำรองข้อมูล",
-                subtitle = apiUrl.ifBlank { "ยังไม่ได้เชื่อมต่อ" },
+                title = "อุปกรณ์ & การเชื่อมต่อ",
+                subtitle = if (apiUrl.isBlank()) "ยังไม่ได้เชื่อมต่อ" else "เชื่อมต่ออยู่ · $apiUrl",
+                onClick = { onOpen(SettingsPage.Device) }
+            )
+            SettingsRow(
+                title = "สำรอง & ส่งออก",
+                subtitle = "JSON / CSV / Downloads",
                 onClick = { onOpen(SettingsPage.Sync) }
             )
             SettingsRow(
@@ -567,9 +599,9 @@ private fun SettingsRow(title: String, subtitle: String, onClick: () -> Unit) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(title, fontWeight = FontWeight.Bold)
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = Color.Gray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            Text("›", style = MaterialTheme.typography.titleLarge, color = Color.Gray)
+            Text("›", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         HorizontalDivider()
     }
@@ -742,16 +774,102 @@ private fun ReadAloudScreen(onClose: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SyncBackupScreen(onClose: () -> Unit) {
+private fun BackupExportScreen(onClose: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf("") }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("สำรอง & ส่งออก") },
+                navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } }
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(16.dp)
+        ) {
+            Text("ส่งออกเป็นไฟล์", fontWeight = FontWeight.Bold)
+            Text(
+                "แชร์ไปได้ทุกที่: Google Drive, อีเมล, Nearby, ส่งเข้าคอม ฯลฯ",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    scope.launch {
+                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
+                        AppLock.suppressNextLock = true
+                        Exporter.share(ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all))
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("แชร์ JSON") }
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    scope.launch {
+                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
+                        AppLock.suppressNextLock = true
+                        Exporter.share(ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all))
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("แชร์ CSV (เปิดใน Excel/Sheets)") }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
+                        val okJson = Exporter.saveToDownloads(
+                            ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all)
+                        )
+                        val okCsv = Exporter.saveToDownloads(
+                            ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all)
+                        )
+                        status = if (okJson && okCsv) "บันทึกลง Downloads แล้ว (${all.size} รายการ)"
+                        else "บันทึกไม่สำเร็จ"
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("บันทึกลงโฟลเดอร์ Downloads") }
+
+            if (status.isNotBlank()) {
+                Spacer(Modifier.height(14.dp))
+                Text(status, fontWeight = FontWeight.SemiBold)
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DeviceConnectionScreen(onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var deviceName by remember { mutableStateOf(Settings.getDeviceName(ctx).ifBlank { Build.MODEL }) }
     var apiUrl by remember { mutableStateOf(Settings.getApiUrl(ctx)) }
     var apiToken by remember { mutableStateOf(Settings.getApiToken(ctx)) }
     var auto by remember { mutableStateOf(Settings.getAutoUpload(ctx)) }
+    var lastSync by remember { mutableStateOf(Settings.getLastSyncTime(ctx)) }
     var status by remember { mutableStateOf("") }
+    var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
+    val captureApps = remember { Settings.getCaptureApps(ctx) }
+
+    LaunchedEffect(Unit) {
+        apps = withContext(Dispatchers.IO) { InstalledApps.scan(ctx, NotiStore.get(ctx).distinctApps()) }
+    }
+    val captureLabels = remember(apps, captureApps) {
+        apps.filter { it.pkg in captureApps }.map { it.label }
+    }
 
     // QR pairing — opens ZXing scanner; the QR payload from the PC dashboard is
-    // either plain URL or JSON {endpoint, token, updateUrl}.
+    // either plain URL or JSON {endpoint, token, updateUrl, captureApps}.
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         val raw = result.contents ?: return@rememberLauncherForActivityResult
         var endpoint: String? = null
@@ -785,7 +903,7 @@ private fun SyncBackupScreen(onClose: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("ซิงค์ & สำรองข้อมูล") },
+                title = { Text("อุปกรณ์ & การเชื่อมต่อ") },
                 navigationIcon = { TextButton(onClick = onClose) { Text("‹ กลับ") } }
             )
         }
@@ -797,51 +915,78 @@ private fun SyncBackupScreen(onClose: () -> Unit) {
                 .verticalScroll(rememberScrollState())
                 .padding(16.dp)
         ) {
-            Text("ส่งออกเป็นไฟล์", fontWeight = FontWeight.Bold)
-            Text(
-                "แชร์ไปได้ทุกที่: Google Drive, อีเมล, Nearby, ส่งเข้าคอม ฯลฯ",
-                style = MaterialTheme.typography.bodySmall
+            Text("ชื่อเครื่องนี้", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            OutlinedTextField(
+                value = deviceName,
+                onValueChange = { deviceName = it; Settings.setDeviceName(ctx, it) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
             )
-            Spacer(Modifier.height(10.dp))
-            Button(
-                onClick = {
-                    scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
-                        Exporter.share(ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all))
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("แชร์ JSON") }
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
-                        Exporter.share(ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all))
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("แชร์ CSV (เปิดใน Excel/Sheets)") }
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(
-                onClick = {
-                    scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
-                        val okJson = Exporter.saveToDownloads(
-                            ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all)
-                        )
-                        val okCsv = Exporter.saveToDownloads(
-                            ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all)
-                        )
-                        status = if (okJson && okCsv) "บันทึกลง Downloads แล้ว (${all.size} รายการ)"
-                        else "บันทึกไม่สำเร็จ"
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("บันทึกลงโฟลเดอร์ Downloads") }
 
             Spacer(Modifier.height(24.dp))
-            Text("อัปโหลดไป Cloud/Server ส่วนตัว (API)", fontWeight = FontWeight.Bold)
+            Text("สถานะการเชื่อมต่อ", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    if (apiUrl.isNotBlank()) MaterialTheme.colorScheme.tertiary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (apiUrl.isNotBlank()) "เชื่อมต่ออยู่" else "ยังไม่ได้เชื่อมต่อ",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    if (apiUrl.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(apiUrl, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            if (lastSync > 0) "ซิงค์ล่าสุด ${relativeTime(lastSync)}" else "ยังไม่เคยซิงค์",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = {
+                    AppLock.suppressNextLock = true
+                    scanLauncher.launch(ScanOptions().apply {
+                        setOrientationLocked(false)
+                        setPrompt("จ่อกล้องไปที่ QR บนหน้าจอ PC (เปิด NotiKeeper Dashboard → Pair Mobile)")
+                        setBeepEnabled(true)
+                    })
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("📷 สแกน QR จาก PC dashboard") }
+
+            Spacer(Modifier.height(20.dp))
+            Text("ตัวกรองที่ใช้อยู่", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(6.dp))
+            if (captureLabels.isEmpty()) {
+                Text(
+                    if (captureApps.isEmpty()) "บันทึกทุกแอป" else "กำลังโหลด...",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    captureLabels.forEach { label -> AssistChip(onClick = {}, label = { Text(label) }) }
+                }
+            }
+
+            Spacer(Modifier.height(28.dp))
+            Text("การเชื่อมต่อขั้นสูง", fontWeight = FontWeight.Bold)
             Text(
                 "POST แบบ JSON ไปยัง endpoint ของคุณ (แนบ Bearer token ถ้ามี)",
                 style = MaterialTheme.typography.bodySmall
@@ -854,17 +999,6 @@ private fun SyncBackupScreen(onClose: () -> Unit) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
-            Spacer(Modifier.height(8.dp))
-            Button(
-                onClick = {
-                    scanLauncher.launch(ScanOptions().apply {
-                        setOrientationLocked(false)
-                        setPrompt("จ่อกล้องไปที่ QR บนหน้าจอ PC (เปิด NotiKeeper Dashboard → Pair Mobile)")
-                        setBeepEnabled(true)
-                    })
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("📷 สแกน QR จาก PC dashboard") }
             Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = apiToken,
@@ -888,8 +1022,10 @@ private fun SyncBackupScreen(onClose: () -> Unit) {
                             val last = Settings.getLastUploadedId(ctx)
                             val fresh = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(last) }
                             if (fresh.isEmpty()) return@runCatching -1
-                            val code = Exporter.uploadJson(apiUrl, apiToken, Exporter.itemsToJson(fresh))
+                            val code = Exporter.uploadJson(apiUrl, apiToken, Exporter.itemsToJson(fresh), deviceName)
                             Settings.setLastUploadedId(ctx, fresh.maxOf { it.id })
+                            Settings.setLastSyncTime(ctx, System.currentTimeMillis())
+                            lastSync = Settings.getLastSyncTime(ctx)
                             code
                         }
                         status = result.fold(
@@ -907,6 +1043,17 @@ private fun SyncBackupScreen(onClose: () -> Unit) {
                 Text(status, fontWeight = FontWeight.SemiBold)
             }
         }
+    }
+}
+
+/** "N นาทีที่แล้ว" / "N ชั่วโมงที่แล้ว" / "N วันที่แล้ว" relative to now, for the last-sync line. */
+private fun relativeTime(epochMs: Long): String {
+    val diffMin = (System.currentTimeMillis() - epochMs) / 60_000
+    return when {
+        diffMin < 1 -> "เมื่อสักครู่"
+        diffMin < 60 -> "$diffMin นาทีที่แล้ว"
+        diffMin < 1440 -> "${diffMin / 60} ชั่วโมงที่แล้ว"
+        else -> "${diffMin / 1440} วันที่แล้ว"
     }
 }
 
@@ -984,8 +1131,8 @@ fun DashboardScreen() {
         stats = withContext(Dispatchers.IO) { NotiStore.get(ctx).getStats() }
     }
     val formatter = remember { SimpleDateFormat("dd/MM/yy HH:mm", Locale.getDefault()) }
-    val sky = Color(0xFF5EC1FF)
-    val gold = Color(0xFFFFC857)
+    val sky = MaterialTheme.colorScheme.primary
+    val gold = MaterialTheme.colorScheme.tertiary
 
     Scaffold(
         topBar = {
@@ -998,7 +1145,7 @@ fun DashboardScreen() {
         val s = stats
         if (s == null) {
             Box(Modifier.padding(padding).fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("กำลังคำนวณ...", color = Color.Gray)
+                Text("กำลังคำนวณ...", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             return@Scaffold
         }
@@ -1043,7 +1190,7 @@ fun DashboardScreen() {
                     Text(
                         "รวม ${s.hourlyLast24h.sum()} ข้อความ · จุดละ 1 ชั่วโมง",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color.Gray
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     Spacer(Modifier.height(12.dp))
                     Sparkline(s.hourlyLast24h, sky, Modifier.fillMaxWidth().height(80.dp))
@@ -1056,7 +1203,7 @@ fun DashboardScreen() {
                     Text("Top แอป", fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(12.dp))
                     if (s.topApps.isEmpty()) {
-                        Text("ยังไม่มีข้อมูล", color = Color.Gray)
+                        Text("ยังไม่มีข้อมูล", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     } else {
                         val maxC = s.topApps.first().second.coerceAtLeast(1)
                         s.topApps.forEach { (name, count) ->
@@ -1081,7 +1228,7 @@ private fun StatTile(
 ) {
     Card(modifier = modifier) {
         Column(modifier = Modifier.padding(14.dp)) {
-            Text(label.uppercase(), style = MaterialTheme.typography.labelSmall, color = Color.Gray)
+            Text(label.uppercase(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(6.dp))
             Text(
                 value,
@@ -1092,7 +1239,7 @@ private fun StatTile(
             )
             if (sub.isNotBlank()) {
                 Spacer(Modifier.height(2.dp))
-                Text(sub, style = MaterialTheme.typography.bodySmall, color = Color.Gray)
+                Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -1104,7 +1251,7 @@ private fun AppBar(name: String, count: Long, max: Long, accent: Color) {
     Column {
         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
             Text(name, fontWeight = FontWeight.SemiBold)
-            Text(count.toString(), color = Color.Gray)
+            Text(count.toString(), color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Spacer(Modifier.height(4.dp))
         Box(

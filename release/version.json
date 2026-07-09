@@ -1,6 +1,6 @@
 ﻿{
-  "versionCode": 13,
-  "versionName": "1.12",
+  "versionCode": 14,
+  "versionName": "1.13",
   "url": "https://github.com/Freshair129/notikeeper/releases/latest/download/NotiKeeper.apk",
-  "notes": "NotiKeeper 1.12 — แก้บั๊กแอป crash ตอนปลดล็อก (AEADBadTagException จาก Keystore master key เสีย) ตอนนี้ recover เองได้ + งานฝั่ง server: noise filter, relational ETL (SQLite), GenesisBlock graph, BGE-M3 semantic search, MCP tools, dashboard Threads/Graph tab"
+  "notes": "NotiKeeper 1.13 — แก้บั๊กสำคัญ: สแกน QR จับคู่มือถือแล้วเด้งขอรหัสวนไม่รู้จบ (ตอนนี้สแกนแล้วจับคู่ได้จริง) + หน้าจอใหม่ ตั้งค่า > อุปกรณ์และการเชื่อมต่อ (ตั้งชื่อเครื่อง, เห็นสถานะเชื่อมต่อ, ตัวกรองแอปที่ใช้อยู่) + bottom nav ใหม่ (Feed/Threads/Dashboard/Settings) + ค่าเริ่มต้นบันทึกเฉพาะ LINE/Messenger/WhatsApp/Telegram + รองรับ dark/light theme ตามเครื่อง"
 }

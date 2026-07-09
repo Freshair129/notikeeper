@@ -1,0 +1,10 @@
+{"task_id": "TASK-0001", "transition": "Started", "title": "Device & Connection settings page", "timestamp": "2026-07-09T10:12:41+07:00"}
+{"task_id": "TASK-0001", "transition": "Verified", "detail": "gradle assembleDebug BUILD SUCCESSFUL", "timestamp": "2026-07-09T10:18:01+07:00"}
+{"task_id": "TASK-0001", "transition": "Completed", "produced_outputs": ["app/src/main/java/com/example/notikeeper/MainActivity.kt", "app/src/main/java/com/example/notikeeper/data/Settings.kt"], "timestamp": "2026-07-09T10:18:01+07:00"}
+{"task_id": "TASK-0002", "transition": "Started", "title": "Sync device name to PC dashboard", "timestamp": "2026-07-09T10:18:01+07:00"}
+{"task_id": "TASK-0002", "transition": "Failed", "detail": "raw Thai text in HTTP header rejected/would be mangled by strict clients (RFC 7230 header values must be ASCII)", "timestamp": "2026-07-09T10:45:00+07:00"}
+{"task_id": "TASK-0002", "transition": "Verified", "detail": "fixed via percent-encoding (URLEncoder + %2B->%20 fix), curl round-trip with real Thai device name confirmed decode-correct via /api/config", "timestamp": "2026-07-09T10:50:43+07:00"}
+{"task_id": "TASK-0002", "transition": "Completed", "produced_outputs": ["app/src/main/java/com/example/notikeeper/Exporter.kt", "app/src/main/java/com/example/notikeeper/MainActivity.kt", "mcp-server/server.mjs", "mcp-server/dashboard.html"], "timestamp": "2026-07-09T10:50:43+07:00"}
+{"task_id": "TASK-0003", "transition": "Started", "title": "Real server-side auth for dashboard API", "detail": "found existing PIN gate was client-side-only cosmetic UI, zero server enforcement on 17 API/SSE calls", "timestamp": "2026-07-09T10:52:00+07:00"}
+{"task_id": "TASK-0003", "transition": "Verified", "detail": "curl matrix: no-token 401, wrong-bearer 401, correct-bearer 200, correct-query-token 200 (SSE/img-src path), dashboard shell loads unauthed 200, /ingest unchanged 401, TOKEN-unset no-op 200 confirmed", "timestamp": "2026-07-09T11:09:32+07:00"}
+{"task_id": "TASK-0003", "transition": "Completed", "produced_outputs": ["mcp-server/server.mjs", "mcp-server/dashboard.html", "landing/public/dashboard.html"], "timestamp": "2026-07-09T11:09:32+07:00"}

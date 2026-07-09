@@ -1,0 +1,16 @@
+{
+  "id": "DOC-0005",
+  "points_to": "SECURITY.md",
+  "type": "doc",
+  "version": "0.1.0",
+  "status": "draft",
+  "superseded_by": null,
+  "sha256": "91ff020b6d313e5a31c49bd33c7d10dcddf8c6abfc7cfd95c0572a6ec3327dc6",
+  "relations": { "depends_on": [], "referenced_by": [] },
+  "attributes": { "doc_type": "spec", "domain": "threat-model" },
+  "created_at": "2026-07-09T10:10:00+07:00",
+  "updated_at": "2026-07-09T10:10:00+07:00",
+  "changelog": [
+    { "version": "0.1.0", "date": "2026-07-09T10:10:00+07:00", "kind": "register", "change": "initial registration (RWANG:QuickStart bootstrap)", "ref": null, "agent": "claude-code", "commit": null }
+  ]
+}

@@ -13,6 +13,31 @@ release.
   exported archives, but cannot capture other apps' notifications or screen
   content like the Android app.
 
+## [1.13] — 2026-07-09
+### Fixed
+- **QR pairing scan loop**: launching the QR scanner (or the notification/
+  accessibility permission screens, or the file-share sheet) triggered the
+  app's re-lock-on-background check, tearing down the screen — and its
+  pending scan-result callback — before the result arrived, so the scan was
+  silently dropped and the app demanded re-authentication every time.
+  Scanning now completes and pairs correctly; see
+  `docs/rca/2026-07-09-qr-scan-relock-loop.md`.
+
+### Added
+- Bottom navigation (Feed / Threads / Dashboard / Settings) replacing the
+  flat TopAppBar button row; Threads folded into a segmented toggle on Feed.
+- **Threads** tab: on-device conversation grouping + Thread Detail chat view.
+- **Settings → อุปกรณ์และการเชื่อมต่อ** (Device & Connection): device name,
+  live connection status, capture-filter summary, QR pairing.
+- Default capture whitelist narrowed to LINE / Messenger / WhatsApp /
+  Telegram (previously captured every app by default); still user-editable.
+- `captureApps` now syncs from the PC dashboard through QR pairing.
+- App-scoped filter chips on Feed.
+- Light/dark theme following the system setting (previously hardcoded dark).
+- Real server-side auth (`NOTIKEEPER_TOKEN`) on all dashboard read APIs and
+  the SSE stream — the PIN gate on the Vercel-hosted dashboard was
+  previously client-side-only and didn't protect the underlying data.
+
 ## [1.11] — 2026-06-26
 ### Added
 - **QR Pairing** between the PC dashboard and the phone: dashboard exposes

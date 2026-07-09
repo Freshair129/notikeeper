@@ -35,13 +35,14 @@ const PORT = parseInt(process.env.NOTIKEEPER_PORT || "8765", 10);
 const TOKEN = process.env.NOTIKEEPER_TOKEN || "";
 const CONFIG_FILE = path.join(__dirname, "config.json");
 
-// Shared mobile config (currently just the capture-app whitelist) — pushed to
-// the phone via QR pairing so it doesn't have to be ticked by hand on-device.
-let CONFIG = { captureApps: [] };
+// Shared mobile config: the capture-app whitelist pushed to the phone via QR
+// pairing, and the last device seen at /ingest (both surfaced on the dashboard).
+let CONFIG = { captureApps: [], lastDevice: null };
 try {
   if (fs.existsSync(CONFIG_FILE)) {
     const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
     if (Array.isArray(parsed.captureApps)) CONFIG.captureApps = parsed.captureApps;
+    if (parsed.lastDevice) CONFIG.lastDevice = parsed.lastDevice;
   }
 } catch (e) { console.error("[notikeeper-mcp] config load failed:", e.message); }
 function saveConfig() {
@@ -200,12 +201,20 @@ const httpServer = http.createServer((req, res) => {
       res.end('{"error":"unauthorized"}');
       return;
     }
+    const deviceName = (() => {
+      try { return decodeURIComponent(req.headers["x-device-name"] || "").trim().slice(0, 100); }
+      catch { return ""; } // malformed percent-encoding — ignore rather than 400 the whole ingest
+    })();
     let body = "";
     req.on("data", (c) => { body += c; if (body.length > 50_000_000) req.destroy(); });
     req.on("end", () => {
       try {
         const parsed = JSON.parse(body);
         const n = ingest(Array.isArray(parsed) ? parsed : [parsed]);
+        if (deviceName) {
+          CONFIG.lastDevice = { name: deviceName, lastSeen: Date.now() };
+          saveConfig();
+        }
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true, received: n, total: rows.length }));
         console.error(`[notikeeper-mcp] ingested ${n} new (total ${rows.length})`);
@@ -220,13 +229,31 @@ const httpServer = http.createServer((req, res) => {
   // 2) Dashboard SPA
   if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/dashboard")) {
     try {
-      const html = fs.readFileSync(DASHBOARD_FILE);
+      let html = fs.readFileSync(DASHBOARD_FILE, "utf8");
+      // Same-machine/LAN access to this page is already inside the trust boundary —
+      // inject the token so the local dashboard authenticates itself automatically,
+      // no login prompt needed here (unlike the Vercel-hosted copy, which is
+      // reachable from anywhere and has no way to know this server's secret).
+      html = html.replace("<head>", `<head>\n<script>window.NK_TOKEN=${JSON.stringify(TOKEN)};</script>`);
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       res.end(html);
     } catch {
       res.writeHead(500); res.end("dashboard.html missing");
     }
     return;
+  }
+
+  // Auth gate for every read API + the SSE stream — no-op unless NOTIKEEPER_TOKEN
+  // is set (matches /ingest's existing opt-in behavior). EventSource can't send
+  // custom headers, so a ?token= query param is accepted as well as the header.
+  if (TOKEN && (url.pathname.startsWith("/api/") || url.pathname === "/events")) {
+    const authHeader = req.headers["authorization"];
+    const queryToken = url.searchParams.get("token");
+    if (authHeader !== `Bearer ${TOKEN}` && queryToken !== TOKEN) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end('{"error":"unauthorized"}');
+      return;
+    }
   }
 
   // 3) JSON APIs for the dashboard

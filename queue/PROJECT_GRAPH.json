@@ -1,0 +1,19 @@
+{
+  "graph_version": "1.0.0",
+  "nodes": [
+    { "id": "MOD-android-app", "type": "module", "title": "Android app", "path": "app/" },
+    { "id": "MOD-mcp-server", "type": "module", "title": "MCP/analytics server", "path": "mcp-server/" },
+    { "id": "MOD-landing", "type": "module", "title": "Landing page", "path": "landing/" },
+    { "id": "SRC-MainActivity", "type": "file", "title": "MainActivity.kt", "path": "app/src/main/java/com/example/notikeeper/MainActivity.kt", "module": "MOD-android-app" },
+    { "id": "SRC-Theme", "type": "file", "title": "Theme.kt", "path": "app/src/main/java/com/example/notikeeper/Theme.kt", "module": "MOD-android-app" },
+    { "id": "SRC-Settings", "type": "file", "title": "Settings.kt", "path": "app/src/main/java/com/example/notikeeper/data/Settings.kt", "module": "MOD-android-app" },
+    { "id": "SRC-NotiStore", "type": "file", "title": "NotiStore.kt", "path": "app/src/main/java/com/example/notikeeper/data/NotiStore.kt", "module": "MOD-android-app" },
+    { "id": "SRC-server", "type": "file", "title": "server.mjs", "path": "mcp-server/server.mjs", "module": "MOD-mcp-server" }
+  ],
+  "edges": [
+    { "from": "SRC-MainActivity", "to": "SRC-Theme", "type": "depends_on" },
+    { "from": "SRC-MainActivity", "to": "SRC-Settings", "type": "depends_on" },
+    { "from": "SRC-MainActivity", "to": "SRC-NotiStore", "type": "depends_on" },
+    { "from": "MOD-android-app", "to": "MOD-mcp-server", "type": "integrates_with" }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "DOC-0004",
+  "points_to": "RELEASE.md",
+  "type": "doc",
+  "version": "0.1.0",
+  "status": "draft",
+  "superseded_by": null,
+  "sha256": "b134777fccb441653c4e238b3c33b47c5d700e4cad1e731b4870ab0f4ae9172a",
+  "relations": { "depends_on": [], "referenced_by": [] },
+  "attributes": { "doc_type": "spec", "domain": "release-process" },
+  "created_at": "2026-07-09T10:10:00+07:00",
+  "updated_at": "2026-07-09T10:10:00+07:00",
+  "changelog": [
+    { "version": "0.1.0", "date": "2026-07-09T10:10:00+07:00", "kind": "register", "change": "initial registration (RWANG:QuickStart bootstrap)", "ref": null, "agent": "claude-code", "commit": null }
+  ]
+}

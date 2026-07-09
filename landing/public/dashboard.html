@@ -51,6 +51,10 @@
       <span class="mono text-[#5EC1FF]">http://192.168.1.x:8765</span>
     </p>
     <input id="server-input" type="url" placeholder="http://192.168.1.x:8765"
+      class="w-full bg-[#0F1B2D] border border-white/10 rounded-xl px-3 py-2.5 text-sm mb-3
+             focus:outline-none focus:border-[#5EC1FF]/50" />
+    <label class="block text-xs text-[#8FA4BC] mb-1">Token (ถ้าตั้ง NOTIKEEPER_TOKEN ไว้ที่ server)</label>
+    <input id="server-token-input" type="password" placeholder="ต้องตรงกับ NOTIKEEPER_TOKEN บนเครื่อง PC"
       class="w-full bg-[#0F1B2D] border border-white/10 rounded-xl px-3 py-2.5 text-sm mb-4
              focus:outline-none focus:border-[#5EC1FF]/50" />
     <div class="flex gap-2">
@@ -293,6 +297,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const SERVER_URL = (localStorage.getItem('nk_server') || '').replace(/\/+$/, '');
 
+// Real server-side credential (separate from the PIN below, which is just a
+// local unlock). Sent as Authorization on every request once NOTIKEEPER_TOKEN
+// is configured on the mcp-server — the PIN alone never reached the server.
+let NK_TOKEN = localStorage.getItem('nk_token') || '';
+(() => {
+  const _fetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    if (!NK_TOKEN) return _fetch(input, init);
+    const headers = new Headers(init.headers || {});
+    headers.set('Authorization', `Bearer ${NK_TOKEN}`);
+    return _fetch(input, { ...init, headers });
+  };
+})();
+
 // ── PIN Auth ──────────────────────────────────────────────────────────────────
 (function () {
   const gate = document.getElementById('pin-gate');
@@ -388,6 +406,7 @@ const SERVER_URL = (localStorage.getItem('nk_server') || '').replace(/\/+$/, '')
   window.openServerCfg = () => {
     const m = document.getElementById('server-modal');
     document.getElementById('server-input').value = localStorage.getItem('nk_server') || '';
+    document.getElementById('server-token-input').value = localStorage.getItem('nk_token') || '';
     m.style.display = 'flex';
   };
   window.closeServerCfg = () => {
@@ -397,6 +416,9 @@ const SERVER_URL = (localStorage.getItem('nk_server') || '').replace(/\/+$/, '')
     const val = document.getElementById('server-input').value.trim();
     if (val) localStorage.setItem('nk_server', val);
     else localStorage.removeItem('nk_server');
+    const token = document.getElementById('server-token-input').value.trim();
+    if (token) localStorage.setItem('nk_token', token);
+    else localStorage.removeItem('nk_token');
     closeServerCfg();
     location.reload();
   };
@@ -540,7 +562,7 @@ document.querySelectorAll('.claude-quick').forEach(btn => {
 
 // SSE — push live updates when new ingest arrives
 function connectSSE() {
-  const es = new EventSource(SERVER_URL + '/events');
+  const es = new EventSource(SERVER_URL + '/events' + (NK_TOKEN ? `?token=${encodeURIComponent(NK_TOKEN)}` : ''));
   es.addEventListener('hello', () => {
     liveDot.className = 'w-1.5 h-1.5 rounded-full bg-[var(--sky)] pulse-dot';
     liveLabel.textContent = 'live';
@@ -561,7 +583,7 @@ async function openPairModal() {
   const info = await (await fetch(SERVER_URL + '/api/pair')).json();
   $("#pair-endpoint").textContent = info.endpoint;
   $("#pair-ip").textContent = `${info.ip}:${info.port}`;
-  $("#pair-qr").src = SERVER_URL + '/api/pair-qr?t=' + Date.now();
+  $("#pair-qr").src = SERVER_URL + '/api/pair-qr?t=' + Date.now() + (NK_TOKEN ? `&token=${encodeURIComponent(NK_TOKEN)}` : '');
   pairModal.classList.remove('hidden');
 }
 $("#pair").addEventListener('click', openPairModal);

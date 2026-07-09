@@ -13,6 +13,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 
 /**
  * Turns captured rows into portable JSON/CSV and gets them off the device:
@@ -97,7 +98,7 @@ object Exporter {
         }.getOrDefault(false)
 
     /** POST JSON to a private endpoint. Returns the HTTP status code, or throws. */
-    suspend fun uploadJson(endpoint: String, token: String, json: String): Int =
+    suspend fun uploadJson(endpoint: String, token: String, json: String, deviceName: String = ""): Int =
         withContext(Dispatchers.IO) {
             val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -106,6 +107,14 @@ object Exporter {
                 readTimeout = 20000
                 setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 if (token.isNotBlank()) setRequestProperty("Authorization", "Bearer $token")
+                // Header values must be ASCII — percent-encode so Thai/non-Latin device
+                // names survive the trip instead of being dropped or mangled. URLEncoder
+                // uses '+' for spaces (form-encoding); switch to %20 so the server's
+                // decodeURIComponent (which doesn't treat '+' as a space) decodes it back correctly.
+                if (deviceName.isNotBlank()) {
+                    val encoded = URLEncoder.encode(deviceName, "UTF-8").replace("+", "%20")
+                    setRequestProperty("X-Device-Name", encoded)
+                }
             }
             try {
                 conn.outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }

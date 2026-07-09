@@ -62,6 +62,14 @@ object Settings {
     fun getLastUploadedId(c: Context): Long = prefs(c).getLong("last_uploaded_id", 0L)
     fun setLastUploadedId(c: Context, v: Long) = prefs(c).edit().putLong("last_uploaded_id", v).apply()
 
+    /** Epoch millis of the last successful upload — shown on the Device & Connection screen. */
+    fun getLastSyncTime(c: Context): Long = prefs(c).getLong("last_sync_time", 0L)
+    fun setLastSyncTime(c: Context, v: Long) = prefs(c).edit().putLong("last_sync_time", v).apply()
+
+    /** Friendly local label for this device. Empty = not set yet (caller falls back to the device model). */
+    fun getDeviceName(c: Context): String = prefs(c).getString("device_name", "") ?: ""
+    fun setDeviceName(c: Context, v: String) = prefs(c).edit().putString("device_name", v).apply()
+
     // Eyes-free read-aloud (driving mode)
     fun getReadAloudNoti(c: Context): Boolean = prefs(c).getBoolean("read_noti", false)
     fun setReadAloudNoti(c: Context, v: Boolean) = prefs(c).edit().putBoolean("read_noti", v).apply()
