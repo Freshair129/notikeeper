@@ -470,82 +470,8 @@ $("#capture-clear").addEventListener('click', () => {
   saveCaptureApps([]);
 });
 
-// ===== Tabs =====
-const feedSections = ['#stats-grid', '#install-info', '#download'].map(s => $(s)).filter(Boolean);
-function setTab(name) {
-  document.querySelectorAll('.tab-btn').forEach(b => {
-    const active = b.dataset.tab === name;
-    b.classList.toggle('bg-[var(--sky)]', active);
-    b.classList.toggle('text-[var(--ink)]', active);
-    b.classList.toggle('text-[var(--muted)]', !active);
-  });
-  document.querySelectorAll('main > section').forEach(s => {
-    if (s.id === 'threads-view') s.classList.toggle('hidden', name !== 'threads');
-    else s.classList.toggle('hidden', name === 'threads');
-  });
-  if (name === 'threads') loadThreads();
-}
-document.querySelectorAll('.tab-btn').forEach(b => {
-  b.addEventListener('click', () => setTab(b.dataset.tab));
-});
-setTab('feed');
-
-// ===== Threads tab =====
-async function loadThreads() {
-  const r = await (await fetch('/api/threads?limit=300')).json();
-  $("#threads-count").textContent = `${r.count.toLocaleString()} threads`;
-  const fmtT = (ms) => new Date(ms).toLocaleString('th-TH', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
-  $("#threads-list").innerHTML = r.threads.map(t => `
-    <div class="thread-row cursor-pointer px-4 py-3 hover:bg-white/[0.04]" data-id="${t.id}">
-      <div class="flex items-center justify-between text-xs">
-        <span class="px-2 py-0.5 rounded bg-[var(--sky)]/15 text-[var(--sky)] font-mono">${t.app}</span>
-        <span class="text-[var(--muted)] mono">${fmtT(t.last_msg)}</span>
-      </div>
-      <div class="font-semibold mt-1 line-clamp-1">${escapeHtml(t.name)}</div>
-      <div class="text-xs text-[var(--paper-2)] mt-1 line-clamp-1">${escapeHtml(t.last_text || '')}</div>
-      <div class="text-[10px] text-[var(--muted)] mt-1">${t.message_count} ข้อความ${t.is_group ? ' · group':''}</div>
-    </div>`).join('');
-  document.querySelectorAll('.thread-row').forEach(row => {
-    row.addEventListener('click', () => openThread(parseInt(row.dataset.id, 10)));
-  });
-}
-
-async function openThread(id) {
-  const t = await (await fetch(`/api/threads/${id}?limit=500`)).json();
-  if (!t || t.error) return;
-  const parts = (t.participants || []).map(p => `<span class="px-2 py-0.5 rounded-full bg-white/5 text-xs">${escapeHtml(p.name)} · ${p.message_count}</span>`).join(' ');
-  $("#thread-header").innerHTML = `
-    <div class="flex items-center justify-between flex-wrap gap-2">
-      <div>
-        <div class="text-xs text-[var(--muted)] mono">${t.app} · #${t.id}${t.is_group?' · group':''}</div>
-        <div class="font-semibold text-lg mt-0.5">${escapeHtml(t.name)}</div>
-      </div>
-      <div class="text-xs text-[var(--muted)]">${t.message_count} ข้อความ</div>
-    </div>
-    <div class="mt-2 flex flex-wrap gap-1">${parts || '<span class="text-xs text-[var(--muted)]">no participants</span>'}</div>`;
-  const fmtT = (ms) => new Date(ms).toLocaleString('th-TH', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit' });
-  $("#thread-body").innerHTML = t.messages.map(m => {
-    const me = m.side === 'me';
-    return `
-      <div class="flex ${me ? 'justify-end' : 'justify-start'}">
-        <div class="${me ? 'bg-[var(--sky)]/15' : 'bg-white/[0.04]'} max-w-[80%] rounded-2xl px-3 py-2">
-          ${m.sender && !me ? `<div class="text-[10px] font-semibold text-[var(--sky)]">${escapeHtml(m.sender)}</div>` : ''}
-          <div class="text-sm whitespace-pre-wrap">${escapeHtml(m.text)}</div>
-          <div class="text-[10px] text-[var(--muted)] mt-1 text-right mono">${fmtT(m.time)} · ${m.source}</div>
-        </div>
-      </div>`;
-  }).join('');
-  $("#thread-body").scrollTop = $("#thread-body").scrollHeight;
-}
-
 // ===== Tab switcher =====
 const tabBtns = document.querySelectorAll('.tab-btn');
-const feedView = document.querySelector('section#features, section#stats-grid') ? null : null;
-const VIEWS = {
-  feed:    ['#stats-grid', 'section.bg-white\\/\\[0.03\\]:has(input#q)', 'section.bg-white\\/\\[0.03\\]:has(#rows)'],
-  threads: ['#threads-view'],
-  graph:   ['#graph-view'],
-};
 function showTab(tab) {
   tabBtns.forEach(b => {
     const on = b.dataset.tab === tab;
