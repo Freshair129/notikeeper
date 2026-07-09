@@ -116,6 +116,27 @@
       "ready": true,
       "created_at": "2026-07-09T11:50:00+07:00",
       "updated_at": "2026-07-09T12:07:32+07:00"
+    },
+    {
+      "id": "TASK-0006",
+      "title": "Purge relations.db in dedup cleanup (not just data.jsonl)",
+      "category": "Storage",
+      "status": "completed",
+      "dependencies": ["TASK-0005"],
+      "required_capability": ["Storage", "Implementation"],
+      "complexity": "M",
+      "estimated_context": "Medium",
+      "local_eligibility": "CLOUD_REQUIRED",
+      "parallelizable": false,
+      "verification": ["Manual"],
+      "priority": 1,
+      "produced_outputs": [
+        "mcp-server/relations.mjs",
+        "mcp-server/server.mjs"
+      ],
+      "ready": true,
+      "created_at": "2026-07-09T12:10:00+07:00",
+      "updated_at": "2026-07-09T12:23:57+07:00"
     }
   ]
 }
