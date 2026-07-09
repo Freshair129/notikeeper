@@ -52,6 +52,18 @@ function saveConfig() {
 const rows = [];
 const seen = new Set();
 const keyOf = (r) => `${r.id}-${r.time}`;
+// Max valid `id` across a batch of rows — used to build the /ingest ack
+// high-water mark (Phase 1 of docs/ARCHITECTURE_CHANGE_REQUEST.md). Returns
+// null if the batch has no rows with a usable numeric id.
+const maxId = (arr) => {
+  let m = null;
+  for (const r of arr) {
+    if (r == null || r.id == null) continue;
+    const n = Number(r.id);
+    if (!Number.isNaN(n) && (m === null || n > m)) m = n;
+  }
+  return m;
+};
 
 /** Live SSE subscribers (browsers watching the dashboard). */
 const sseClients = new Set();
@@ -233,12 +245,13 @@ const isNoise = (r) => classifyNoise(r) !== null;
 // ---------- helpers used by every layer ----------
 const byNewest = (a, b) => b.time - a.time;
 
-function filterRows({ query, app, source, sinceMs, untilMs, denoise = false }) {
+function filterRows({ query, app, source, sinceMs, untilMs, sinceId, denoise = false }) {
   const q = (query || "").toLowerCase();
   const a = (app || "").toLowerCase();
   return rows.filter((r) => {
     if (sinceMs && r.time < sinceMs) return false;
     if (untilMs && r.time >= untilMs) return false;
+    if (sinceId && !(Number(r.id) > sinceId)) return false;
     if (source && r.source !== source) return false;
     if (a && !(r.app || "").toLowerCase().includes(a)) return false;
     if (q && !((r.text || "").toLowerCase().includes(q) ||
@@ -280,13 +293,20 @@ const httpServer = http.createServer((req, res) => {
     req.on("end", () => {
       try {
         const parsed = JSON.parse(body);
-        const n = ingest(Array.isArray(parsed) ? parsed : [parsed]);
+        const batch = Array.isArray(parsed) ? parsed : [parsed];
+        const n = ingest(batch);
         if (deviceName) {
           CONFIG.lastDevice = { name: deviceName, lastSeen: Date.now() };
           saveConfig();
         }
+        // Ack high-water mark (docs/ARCHITECTURE_CHANGE_REQUEST.md Phase 1): the
+        // batch is fsync'd to data.jsonl inside ingest() above, before this
+        // response goes out, so acking the batch's max id is durable — safe for
+        // the phone to treat as a prune floor. Falls back to the server's overall
+        // max id when the batch had none (e.g. all rows were malformed).
+        const ackedThroughId = maxId(batch) ?? maxId(rows) ?? 0;
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, received: n, total: rows.length }));
+        res.end(JSON.stringify({ ok: true, received: n, total: rows.length, ackedThroughId }));
         console.error(`[notikeeper-mcp] ingested ${n} new (total ${rows.length})`);
       } catch (e) {
         res.writeHead(400, { "Content-Type": "application/json" });
@@ -335,6 +355,10 @@ const httpServer = http.createServer((req, res) => {
       source:  url.searchParams.get("source") || "",
       sinceMs: parseInt(url.searchParams.get("since") || "0", 10) || 0,
       untilMs: parseInt(url.searchParams.get("until") || "0", 10) || 0,
+      // sinceId: row-id cursor for incremental pull (Phase 3 of
+      // docs/ARCHITECTURE_CHANGE_REQUEST.md) — kept separate from `since`,
+      // which is already the dashboard's epoch-ms day-range filter.
+      sinceId: parseInt(url.searchParams.get("sinceId") || "0", 10) || 0,
       denoise: url.searchParams.get("denoise") === "1",
     }).sort(byNewest).slice(0, limit);
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
