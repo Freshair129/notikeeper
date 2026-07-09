@@ -90,6 +90,32 @@
       "ready": true,
       "created_at": "2026-07-09T11:12:00+07:00",
       "updated_at": "2026-07-09T11:30:15+07:00"
+    },
+    {
+      "id": "TASK-0005",
+      "title": "Versioning to SemVer x.y.z; thread-title fix; multi-app rebuild; dedup cleanup; ship v1.1.4",
+      "category": "Core",
+      "status": "completed",
+      "dependencies": [],
+      "required_capability": ["Implementation", "Storage"],
+      "complexity": "L",
+      "estimated_context": "Medium",
+      "local_eligibility": "CLOUD_REQUIRED",
+      "parallelizable": false,
+      "verification": ["Compiler", "Manual"],
+      "priority": 1,
+      "produced_outputs": [
+        "app/build.gradle.kts",
+        "app/src/main/java/com/example/notikeeper/MessengerReaderService.kt",
+        "mcp-server/rebuild-chatlog.mjs",
+        "mcp-server/server.mjs",
+        "release/version.json",
+        "CHANGELOG.md",
+        "docs/rca/2026-07-09-thread-title-chrome-leak.md"
+      ],
+      "ready": true,
+      "created_at": "2026-07-09T11:50:00+07:00",
+      "updated_at": "2026-07-09T12:07:32+07:00"
     }
   ]
 }
