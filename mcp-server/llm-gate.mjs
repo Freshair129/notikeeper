@@ -46,25 +46,43 @@ const hashKey = (pkg, title, text) =>
   crypto.createHash("sha256").update(`${pkg || ""}|${title || ""}|${text || ""}`).digest("hex");
 
 // ── Ambiguity heuristic ───────────────────────────────────────────────────────
-// We only spend an LLM call on lines a regex genuinely can't settle. Confidently
-// real (long, multi-clause) or confidently chrome (matches a hard pattern) lines
-// are skipped — the existing filters already own those. What's left: short,
-// single-line fragments in the 2–40 char band that carry letters (not pure
-// number/emoji/punctuation). Those are the "OK button vs 'ok' reply" cases.
+// The gate exists to rescue the ONE case the cheap filters get wrong: relations.mjs
+// `looksLikeChromeLabel` drops every short single/near-single word as chrome, which
+// also kills real one-word replies ("ครับ", "ได้", "555", "โอเค"). So the ambiguous
+// zone is deliberately narrow — short 1–2 word fragments that carry letters and
+// aren't already confidently chrome. Longer / multi-word lines are confident real
+// messages the filters already keep; exact chrome (times, "seen", pure symbols) is
+// confident chrome the filters already drop. Neither needs an LLM call.
 const HARD_CHROME_RE = [
   /^\d{1,2}:\d{2}(\s?[AP]M)?$/i,            // bare times
-  /^(seen|delivered|sent|active now|online|typing)/i,
-  /^(อ่านแล้ว|ส่งแล้ว|ออนไลน์|พิมพ์อยู่)/,
+  /^\d+\s*[dhwmy]$/i,                       // relative-age labels: 1d, 2h, 3w
+  /^(seen|delivered|sent|active now|online|typing)$/i,
+  /^(อ่านแล้ว|ส่งแล้ว|ออนไลน์|พิมพ์อยู่)$/,
   /^[\d\W_]+$/u,                            // pure digits / punctuation / emoji
-  /^(mon|tue|wed|thu|fri|sat|sun)\b/i,
+  /^(mon|tue|wed|thu|fri|sat|sun)$/i,
   /button|ปุ่ม/i,
 ];
-function isAmbiguous(text) {
+
+// Real conversations the gate can meaningfully rescue live in the core chat
+// apps (same set as the capture default). Instagram/Facebook capture is
+// dominated by feed/story chrome where "is this a real chat message" barely
+// applies — scoping to these keeps the ambiguous set focused and small.
+const CHAT_PKGS = new Set([
+  "jp.naver.line.android", "com.facebook.orca", "com.facebook.mlite",
+  "com.whatsapp", "com.whatsapp.w4b", "org.telegram.messenger",
+  "org.thunderdog.challegram",
+]);
+
+function isAmbiguous(text, source, pkg) {
+  // Only `screen` source has the false-drop the gate rescues: relations.mjs runs
+  // looksLikeChromeLabel on screen text only. noti text isn't heuristic-dropped.
+  if (source !== "screen") return false;
+  if (!CHAT_PKGS.has((pkg || "").trim())) return false;    // scope to real chat apps
   const t = (text || "").trim();
-  if (t.length < 2 || t.length > 40) return false;         // too short/long to be borderline
+  if (t.length < 2 || t.length > 15) return false;         // borderline zone is SHORT
   if (!/[\p{L}]/u.test(t)) return false;                    // no letters -> not a message
+  if (t.split(/\s+/).length > 2) return false;             // 3+ words -> confident real message
   for (const re of HARD_CHROME_RE) if (re.test(t)) return false; // already confidently chrome
-  if (/\s/.test(t) && t.length > 25) return false;          // longer multi-word -> lean real, skip
   return true;
 }
 
@@ -143,14 +161,22 @@ function saveCache(cache) {
 }
 
 // ── Public API (integration surface for relations.mjs) ────────────────────────
+// One module-level cache shared by getVerdict() and runGate(), so verdicts a
+// gate run produces are immediately visible to parseRow in the same process
+// (no restart needed). NOTE: reindex() is insert-only, so newly-cached verdicts
+// only affect rows parsed AFTER the run — retroactively applying them to rows
+// already in relations.db needs a from-scratch reindex (rm relations.db).
 let _cache = null;
+function cache() {
+  if (_cache === null) _cache = loadCache();
+  return _cache;
+}
 /**
  * Cached verdict for a line, or null if it was never classified (caller should
  * fall back to its own heuristic — the gate only ever covers ambiguous lines).
  */
 export function getVerdict(pkg, title, text) {
-  if (_cache === null) _cache = loadCache();
-  const v = _cache[hashKey(pkg, title, text)];
+  const v = cache()[hashKey(pkg, title, text)];
   return v === undefined ? null : v.isMessage;
 }
 
@@ -170,7 +196,7 @@ export async function runGate({ limit = Infinity, dry = false } = {}) {
     return { ambiguous: 0, classified: 0, notMessage: 0, skipped: "model-missing" };
   }
 
-  const cache = loadCache();
+  const store = cache(); // shared module cache — getVerdict sees updates immediately
   // Collect unique ambiguous lines not already in the cache.
   const pending = new Map(); // hash -> {pkg,title,text,app}
   for (const line of fs.readFileSync(DATA_FILE, "utf8").split("\n")) {
@@ -178,9 +204,9 @@ export async function runGate({ limit = Infinity, dry = false } = {}) {
     if (!t) continue;
     let r;
     try { r = JSON.parse(t); } catch { continue; }
-    if (!isAmbiguous(r.text)) continue;
+    if (!isAmbiguous(r.text, r.source, r.pkg)) continue;
     const h = hashKey(r.pkg, r.title, r.text);
-    if (cache[h] !== undefined || pending.has(h)) continue;
+    if (store[h] !== undefined || pending.has(h)) continue;
     pending.set(h, { pkg: r.pkg, title: r.title, text: r.text, app: r.app });
   }
 
@@ -190,12 +216,12 @@ export async function runGate({ limit = Infinity, dry = false } = {}) {
     if (classified >= limit) break;
     const verdict = await classify(row.app, row.title, row.text);
     if (verdict === null) { failed++; continue; }         // don't cache failures — retry next run
-    cache[h] = { isMessage: verdict, text: row.text.slice(0, 80) };
+    if (!dry) store[h] = { isMessage: verdict, text: row.text.slice(0, 80) };
     classified++;
     if (!verdict) notMessage++;
   }
 
-  if (!dry && classified > 0) saveCache(cache);
+  if (!dry && classified > 0) saveCache(store);
   console.error(
     `[gate] ${total} uncached ambiguous lines · classified ${classified} ` +
     `(${notMessage} chrome / ${classified - notMessage} message)` +

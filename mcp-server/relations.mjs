@@ -12,6 +12,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getVerdict } from "./llm-gate.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -255,8 +256,18 @@ function parseRow(r) {
   // Skip system app noise outright — these never carry real messages.
   if (["Meta App Manager", "Galaxy Store", "Samsung capture",
        "Dashboard Test", "HealthCheck"].includes(app)) return null;
-  // Screen-capture artefacts: very short labels are almost always button text.
-  if (source === "screen" && looksLikeChromeLabel(text)) return null;
+
+  // LLM quality-gate (Phase 4): for the short 1–2 word fragments the cheap
+  // heuristic can't settle, a cached Chinda verdict overrides it. `false` =
+  // LLM-confirmed chrome (drop); `true` = LLM says a real one-word reply
+  // ("ครับ") that looksLikeChromeLabel would wrongly drop — keep it; `null` =
+  // never classified, fall back to the heuristic. See llm-gate.mjs.
+  const verdict = getVerdict(pkg, title, text);
+  if (verdict === false) return null;
+
+  // Screen-capture artefacts: very short labels are almost always button text —
+  // unless the gate rescued this exact line as a real message.
+  if (verdict !== true && source === "screen" && looksLikeChromeLabel(text)) return null;
   if (CHROME_WORDS.has(text.trim())) return null;
   // Screen reader sometimes captures a UI button ("ย้อนกลับ", "เมนู") as the
   // top-most short line and tags it as the thread title. Drop those — they are
