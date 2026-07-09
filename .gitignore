@@ -47,3 +47,4 @@ ios/**/*.xcuserstate
 .vscode/
 .DS_Store
 Thumbs.db
+mcp-server/llm-verdicts.json

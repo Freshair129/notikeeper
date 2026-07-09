@@ -26,6 +26,7 @@ import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, delet
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
+import { runGate } from "./llm-gate.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
@@ -499,6 +500,19 @@ const httpServer = http.createServer((req, res) => {
     const r = dedupCleanup();
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({ ok: true, ...r }));
+    return;
+  }
+
+  // LLM quality-gate (Phase 4) — MANUAL trigger only. The full backfill is tens
+  // of thousands of ambiguous lines (~hours of local inference), so it is never
+  // run automatically or inline with /ingest. Cap each run with ?limit=. Verdicts
+  // accumulate in llm-verdicts.json; degrades to a no-op if Ollama/model absent.
+  if (req.method === "POST" && url.pathname === "/api/gate/run") {
+    const limit = parseInt(url.searchParams.get("limit") || "200", 10);
+    runGate({ limit }).then(
+      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, ...r })); },
+      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+    );
     return;
   }
 
