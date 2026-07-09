@@ -62,6 +62,16 @@ object Settings {
     fun getLastUploadedId(c: Context): Long = prefs(c).getLong("last_uploaded_id", 0L)
     fun setLastUploadedId(c: Context, v: Long) = prefs(c).edit().putLong("last_uploaded_id", v).apply()
 
+    /**
+     * Server-confirmed high-water mark: the max row id the PC has durably
+     * stored (from `/ingest`'s `ackedThroughId`). Prep for a future prune
+     * (see docs/ARCHITECTURE_CHANGE_REQUEST.md phase 2) — not used for
+     * deletion yet. Never allowed to move backwards.
+     */
+    fun getPrunableThroughId(c: Context): Long = prefs(c).getLong("prunable_through_id", 0L)
+    fun setPrunableThroughId(c: Context, v: Long) =
+        prefs(c).edit().putLong("prunable_through_id", maxOf(v, getPrunableThroughId(c))).apply()
+
     /** Epoch millis of the last successful upload — shown on the Device & Connection screen. */
     fun getLastSyncTime(c: Context): Long = prefs(c).getLong("last_sync_time", 0L)
     fun setLastSyncTime(c: Context, v: Long) = prefs(c).edit().putLong("last_sync_time", v).apply()

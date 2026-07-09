@@ -97,8 +97,11 @@ object Exporter {
             true
         }.getOrDefault(false)
 
-    /** POST JSON to a private endpoint. Returns the HTTP status code, or throws. */
-    suspend fun uploadJson(endpoint: String, token: String, json: String, deviceName: String = ""): Int =
+    /** Result of a successful upload: HTTP status + the server's ack high-water mark (0 if absent/unparseable). */
+    data class UploadResult(val code: Int, val ackedThroughId: Long)
+
+    /** POST JSON to a private endpoint. Returns the HTTP status code + ack high-water mark, or throws. */
+    suspend fun uploadJson(endpoint: String, token: String, json: String, deviceName: String = ""): UploadResult =
         withContext(Dispatchers.IO) {
             val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -120,7 +123,10 @@ object Exporter {
                 conn.outputStream.use { it.write(json.toByteArray(Charsets.UTF_8)) }
                 val code = conn.responseCode
                 if (code !in 200..299) throw RuntimeException("HTTP $code")
-                code
+                val body = conn.inputStream.use { it.readBytes().toString(Charsets.UTF_8) }
+                val ackedThroughId = runCatching { JSONObject(body).optLong("ackedThroughId", 0L) }
+                    .getOrDefault(0L)
+                UploadResult(code, ackedThroughId)
             } finally {
                 conn.disconnect()
             }

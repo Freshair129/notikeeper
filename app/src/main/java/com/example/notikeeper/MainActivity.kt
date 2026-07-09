@@ -416,7 +416,7 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                 val last = Settings.getLastUploadedId(ctx)
                 val fresh = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(last) }
                 if (fresh.isNotEmpty()) {
-                    Exporter.uploadJson(
+                    val result = Exporter.uploadJson(
                         Settings.getApiUrl(ctx),
                         Settings.getApiToken(ctx),
                         Exporter.itemsToJson(fresh),
@@ -424,6 +424,7 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     )
                     Settings.setLastUploadedId(ctx, fresh.maxOf { it.id })
                     Settings.setLastSyncTime(ctx, System.currentTimeMillis())
+                    if (result.ackedThroughId > 0) Settings.setPrunableThroughId(ctx, result.ackedThroughId)
                 }
             }
         }
@@ -1022,11 +1023,12 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
                             val last = Settings.getLastUploadedId(ctx)
                             val fresh = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(last) }
                             if (fresh.isEmpty()) return@runCatching -1
-                            val code = Exporter.uploadJson(apiUrl, apiToken, Exporter.itemsToJson(fresh), deviceName)
+                            val uploaded = Exporter.uploadJson(apiUrl, apiToken, Exporter.itemsToJson(fresh), deviceName)
                             Settings.setLastUploadedId(ctx, fresh.maxOf { it.id })
                             Settings.setLastSyncTime(ctx, System.currentTimeMillis())
+                            if (uploaded.ackedThroughId > 0) Settings.setPrunableThroughId(ctx, uploaded.ackedThroughId)
                             lastSync = Settings.getLastSyncTime(ctx)
-                            code
+                            uploaded.code
                         }
                         status = result.fold(
                             { if (it == -1) "ไม่มีรายการใหม่" else "อัปโหลดสำเร็จ (HTTP $it)" },

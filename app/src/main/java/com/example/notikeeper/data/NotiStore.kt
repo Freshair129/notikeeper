@@ -57,9 +57,13 @@ class NotiStore private constructor(
         db.execSQL("CREATE INDEX idx_time ON notifications(postTime)")
     }
 
+    // The phone is becoming a capture buffer whose rows must survive schema
+    // bumps (see docs/ARCHITECTURE_CHANGE_REQUEST.md) — the PC is only ever
+    // caught up via uploads it acknowledged, so dropping the table here would
+    // silently destroy un-acked data. No schema change is pending, so this is
+    // a no-op; future migrations must be additive (ALTER TABLE / CREATE INDEX
+    // IF NOT EXISTS), never a DROP.
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS notifications")
-        onCreate(db)
     }
 
     /** Insert one captured notification (background, app-wide). */
