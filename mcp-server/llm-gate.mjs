@@ -86,6 +86,50 @@ function isAmbiguous(text, source, pkg) {
   return true;
 }
 
+// ── Guardrail (post-LLM) ────────────────────────────────────────────────────
+// The full backfill (2026-07-09, 6522 lines) found the model conflates "short
+// reply" and "bare contact name/brand/UI label" because they're textually
+// identical without the UI-position context this pipeline doesn't carry:
+// 209/315 raw "message" rescues were actually names (Boo, Netflix, Ratchapol),
+// currency (THB 5000), casino game titles (CAISHEN WINS), masked strings
+// (f*******), or action chrome (Go back, Bluetooth on). A closed whitelist of
+// casual reply words is tractable; the space of possible names/brands is open,
+// so pattern-match the failure SHAPES we actually saw and downgrade those back
+// to chrome regardless of what the LLM said. Never used to override false->true.
+const REPLY_ALLOWLIST = new Set([
+  "ok", "ok ka", "okay", "okey", "good", "great", "nice", "perfect", "yes", "no",
+  "sure", "lol", "lmao", "555", "5555", "55555", "hi", "hello", "hey", "bye",
+  "thanks", "thank you", "sorry",
+]);
+const KNOWN_BRANDS = new Set([
+  "netflix", "chatgpt", "github", "fireflies", "omi", "guitartuna",
+  "anythingllm", "duckduckgo", "eva", "spotify", "youtube", "google",
+]);
+const UI_ACTION_RE = /^(go back|call again|call ended|open camera\.?|bluetooth on\.?|power off|delete|check out|free parking|yes,? cancel|no,? remove)$/i;
+const ALLCAPS_RE = /^[A-Z][A-Z0-9 .,!'*]{2,}$/;          // CAISHEN WINS, NO REMOVE, Y568
+const CURRENCY_RE = /THB|^\d+\.\d{2}$/i;                  // THB 5000, 78.96
+const MASKED_RE = /\*{2,}|^[*a-z]{1,2}\*+[*a-z]*$/i;      // f*******, **y*****
+const USERNAME_HANDLE_RE = /^[a-z][a-z0-9_.]{6,}$/;       // chinesewithmee, cee_kawemoragot
+const TITLE_CASE_NAME_RE = /^[A-Z][a-zA-Z']*\.?(\s+[A-Z][a-zA-Z'.]*\.?){0,2}$/; // Boo, Milk Jidapa, Texaa Thuechart.
+const WIDGET_RE = /^(AQI|Sunset|Sunrise|Weather|Light Rain)\b/i; // home-screen widget scrape leakage
+
+export function looksLikeNameOrChromeShape(text) {
+  const t = (text || "").trim();
+  if (/^(You|Draft):/i.test(t)) return false;              // inbox-preview snippet -> always real
+  if (REPLY_ALLOWLIST.has(t.toLowerCase())) return false;
+  if (KNOWN_BRANDS.has(t.toLowerCase())) return true;
+  if (UI_ACTION_RE.test(t)) return true;
+  if (ALLCAPS_RE.test(t)) return true;
+  if (CURRENCY_RE.test(t)) return true;
+  if (MASKED_RE.test(t)) return true;
+  if (USERNAME_HANDLE_RE.test(t)) return true;
+  if (WIDGET_RE.test(t)) return true;                       // AQI/weather widget, even with a Thai suffix
+  if (/\n/.test(t) && /\b(online|active now|typing)\b/i.test(t)) return true; // contact-code+status glued together
+  if (/[฀-๿]/.test(t)) return false;              // has Thai script -> not a bare Latin name/brand shape
+  if (TITLE_CASE_NAME_RE.test(t)) return true;              // bare 1-3 Title-Case Latin words -> name-shaped
+  return false;
+}
+
 // ── Ollama ────────────────────────────────────────────────────────────────────
 async function ollamaUp() {
   try {
@@ -183,7 +227,9 @@ function cache() {
  */
 export function getVerdict(pkg, title, text) {
   const v = cache()[hashKey(pkg, title, text)];
-  return v === undefined ? null : v.isMessage;
+  if (v === undefined) return null;
+  if (v.isMessage && looksLikeNameOrChromeShape(text)) return false; // guard applies at read time too
+  return v.isMessage;
 }
 
 /** Classify all uncached ambiguous lines in data.jsonl. Returns a summary. */
@@ -220,8 +266,9 @@ export async function runGate({ limit = Infinity, dry = false } = {}) {
   let classified = 0, notMessage = 0, failed = 0;
   for (const [h, row] of pending) {
     if (classified >= limit) break;
-    const verdict = await classify(row.app, row.title, row.text);
+    let verdict = await classify(row.app, row.title, row.text);
     if (verdict === null) { failed++; continue; }         // don't cache failures — retry next run
+    if (verdict && looksLikeNameOrChromeShape(row.text)) verdict = false; // guard: never let LLM rescue a name/brand/chrome shape
     if (!dry) {
       store[h] = { isMessage: verdict, text: row.text.slice(0, 80) };
       if (classified % 100 === 0) saveCache(store);        // checkpoint — a long run must survive interruption
