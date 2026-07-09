@@ -7,12 +7,17 @@
       "category": "UI",
       "status": "completed",
       "dependencies": [],
-      "required_capability": ["UI", "Implementation"],
+      "required_capability": [
+        "UI",
+        "Implementation"
+      ],
       "complexity": "M",
       "estimated_context": "Medium",
       "local_eligibility": "LOCAL_SAFE",
       "parallelizable": false,
-      "verification": ["Compiler"],
+      "verification": [
+        "Compiler"
+      ],
       "priority": 1,
       "produced_outputs": [
         "app/src/main/java/com/example/notikeeper/MainActivity.kt",
@@ -27,13 +32,21 @@
       "title": "Sync device name to PC dashboard",
       "category": "Core",
       "status": "completed",
-      "dependencies": ["TASK-0001"],
-      "required_capability": ["Implementation", "Storage"],
+      "dependencies": [
+        "TASK-0001"
+      ],
+      "required_capability": [
+        "Implementation",
+        "Storage"
+      ],
       "complexity": "S",
       "estimated_context": "Small",
       "local_eligibility": "LOCAL_SAFE",
       "parallelizable": false,
-      "verification": ["Compiler", "Manual"],
+      "verification": [
+        "Compiler",
+        "Manual"
+      ],
       "priority": 1,
       "produced_outputs": [
         "app/src/main/java/com/example/notikeeper/Exporter.kt",
@@ -51,12 +64,17 @@
       "category": "Core",
       "status": "completed",
       "dependencies": [],
-      "required_capability": ["Security", "Implementation"],
+      "required_capability": [
+        "Security",
+        "Implementation"
+      ],
       "complexity": "M",
       "estimated_context": "Medium",
       "local_eligibility": "CLOUD_REQUIRED",
       "parallelizable": false,
-      "verification": ["Manual"],
+      "verification": [
+        "Manual"
+      ],
       "priority": 1,
       "produced_outputs": [
         "mcp-server/server.mjs",
@@ -73,12 +91,18 @@
       "category": "Core",
       "status": "completed",
       "dependencies": [],
-      "required_capability": ["Implementation", "Security"],
+      "required_capability": [
+        "Implementation",
+        "Security"
+      ],
       "complexity": "M",
       "estimated_context": "Medium",
       "local_eligibility": "CLOUD_REQUIRED",
       "parallelizable": false,
-      "verification": ["Compiler", "Manual"],
+      "verification": [
+        "Compiler",
+        "Manual"
+      ],
       "priority": 1,
       "produced_outputs": [
         "app/src/main/java/com/example/notikeeper/MainActivity.kt",
@@ -97,12 +121,18 @@
       "category": "Core",
       "status": "completed",
       "dependencies": [],
-      "required_capability": ["Implementation", "Storage"],
+      "required_capability": [
+        "Implementation",
+        "Storage"
+      ],
       "complexity": "L",
       "estimated_context": "Medium",
       "local_eligibility": "CLOUD_REQUIRED",
       "parallelizable": false,
-      "verification": ["Compiler", "Manual"],
+      "verification": [
+        "Compiler",
+        "Manual"
+      ],
       "priority": 1,
       "produced_outputs": [
         "app/build.gradle.kts",
@@ -122,13 +152,20 @@
       "title": "Purge relations.db in dedup cleanup (not just data.jsonl)",
       "category": "Storage",
       "status": "completed",
-      "dependencies": ["TASK-0005"],
-      "required_capability": ["Storage", "Implementation"],
+      "dependencies": [
+        "TASK-0005"
+      ],
+      "required_capability": [
+        "Storage",
+        "Implementation"
+      ],
       "complexity": "M",
       "estimated_context": "Medium",
       "local_eligibility": "CLOUD_REQUIRED",
       "parallelizable": false,
-      "verification": ["Manual"],
+      "verification": [
+        "Manual"
+      ],
       "priority": 1,
       "produced_outputs": [
         "mcp-server/relations.mjs",
@@ -144,12 +181,17 @@
       "category": "Storage",
       "status": "completed",
       "dependencies": [],
-      "required_capability": ["Storage", "Implementation"],
+      "required_capability": [
+        "Storage",
+        "Implementation"
+      ],
       "complexity": "S",
       "estimated_context": "Small",
       "local_eligibility": "LOCAL_SAFE",
       "parallelizable": false,
-      "verification": ["Compiler"],
+      "verification": [
+        "Compiler"
+      ],
       "priority": 1,
       "produced_outputs": [
         "app/src/main/java/com/example/notikeeper/data/NotiStore.kt",
@@ -168,12 +210,19 @@
       "category": "Infrastructure",
       "status": "completed",
       "dependencies": [],
-      "required_capability": ["Architecture", "Storage", "Implementation"],
+      "required_capability": [
+        "Architecture",
+        "Storage",
+        "Implementation"
+      ],
       "complexity": "XL",
       "estimated_context": "Large",
       "local_eligibility": "CLOUD_REQUIRED",
       "parallelizable": true,
-      "verification": ["Compiler", "Manual"],
+      "verification": [
+        "Compiler",
+        "Manual"
+      ],
       "priority": 2,
       "note": "ACR APPROVED 2026-07-09. Dispatched to 3 parallel sonnet worktree-agents. Agent A (server ack) + Agent C (mobile ack + onUpgrade fix) completed and were cherry-picked (f1c7b62, 3c6301e). Agent B (LLM gate) died mid-run on a session restart with an empty worktree; reimplemented directly (eeb393b) and verified against the real Chinda Qwen3-4B model. Integrated Kotlin build + server boot + gate endpoint all verified. Phase 2 (destructive prune) deferred. Follow-ups: wire getVerdict() into relations.mjs parseRow to gate embeddings; tighten the gate ambiguity heuristic (48k lines ~= half corpus, too broad); schedule/run the ~5h backfill deliberately.",
       "produced_outputs": [
@@ -192,20 +241,28 @@
       "id": "TASK-0009",
       "title": "Phase 2: on-device prune of acked+aged raw (DESTRUCTIVE — deferred)",
       "category": "Storage",
-      "status": "pending",
-      "dependencies": ["TASK-0008"],
-      "required_capability": ["Storage", "Implementation"],
+      "status": "completed",
+      "dependencies": [
+        "TASK-0008"
+      ],
+      "required_capability": [
+        "Storage",
+        "Implementation"
+      ],
       "complexity": "L",
       "estimated_context": "Medium",
       "local_eligibility": "CLOUD_REQUIRED",
       "parallelizable": false,
-      "verification": ["Compiler", "Manual"],
+      "verification": [
+        "Compiler",
+        "Manual"
+      ],
       "priority": 3,
-      "note": "Deferred per ACR risk section. Phone deletes raw strictly below the confirmed prunableThroughId AND older than a retention floor (e.g. 7 days). Needs: extensive tests; a real onUpgrade migration (done in TASK-0008); and hardening the empty-batch ackedThroughId fallback (server returns global max on empty batch — harmless today since the phone never uploads empty batches, but must be scoped per-device before prune trusts it).",
+      "note": "Shipped v1.2.0 (versionCode 17). NotiStore.pruneAcked(throughId, retentionFloorMs=7d) wired into both upload paths, gated by Settings.getPruneEnabled (OFF by default -- owner opts in from Device & Connection screen). Documented (no functional change) the single-device assumption behind /ingest ackedThroughId empty-batch fallback in server.mjs. Build verified. Not yet enabled on the owner's device -- awaiting their decision to flip the switch after observing the ack protocol in the wild.",
       "produced_outputs": [],
-      "ready": false,
+      "ready": true,
       "created_at": "2026-07-09T14:19:16+07:00",
-      "updated_at": "2026-07-09T14:19:16+07:00"
+      "updated_at": "2026-07-09T18:20:00+07:00"
     }
   ]
 }
