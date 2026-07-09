@@ -16,6 +16,9 @@ mcp-server/config.json
 mcp-server/relations.db
 mcp-server/relations.db-shm
 mcp-server/relations.db-wal
+mcp-server/relations.db.*
+mcp-server/relations.db-shm.*
+mcp-server/relations.db-wal.*
 mcp-server/graph.db/
 mcp-server/graph.db
 mcp-server/graph.db-shm

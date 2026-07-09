@@ -348,6 +348,70 @@ function countAll(db, table) {
   return db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
 }
 
+/**
+ * Deletes specific messages by raw_key ("source|rawId|time", same key
+ * insertMsg dedups on) and fully recomputes the derived aggregates
+ * (thread/user message_count, first/last time, is_group, participants) for
+ * whatever threads/users were touched — a full recompute from the remaining
+ * rows rather than incremental decrements, so there's no chance of aggregate
+ * drift. messages_fts stays in sync automatically via the AFTER DELETE
+ * trigger in initSchema. Used by server.mjs's dedupCleanup().
+ */
+export function deleteMessages(db, rawKeys) {
+  if (!rawKeys.length) return { deleted: 0, threadsUpdated: 0, usersUpdated: 0 };
+
+  const threadIds = new Set();
+  const userIds = new Set();
+  let deleted = 0;
+
+  const CHUNK = 500;
+  const deleteChunk = db.transaction((chunk) => {
+    const placeholders = chunk.map(() => "?").join(",");
+    const affected = db.prepare(
+      `SELECT DISTINCT thread_id, sender_id FROM messages WHERE raw_key IN (${placeholders})`
+    ).all(...chunk);
+    for (const r of affected) {
+      threadIds.add(r.thread_id);
+      if (r.sender_id != null) userIds.add(r.sender_id);
+    }
+    const info = db.prepare(`DELETE FROM messages WHERE raw_key IN (${placeholders})`).run(...chunk);
+    deleted += info.changes;
+  });
+  for (let i = 0; i < rawKeys.length; i += CHUNK) deleteChunk(rawKeys.slice(i, i + CHUNK));
+
+  const recompute = db.transaction(() => {
+    for (const threadId of threadIds) {
+      const agg = db.prepare(
+        `SELECT COUNT(*) AS n, MIN(time) AS first, MAX(time) AS last,
+                COUNT(DISTINCT sender_id) AS senders
+         FROM messages WHERE thread_id = ?`
+      ).get(threadId);
+      db.prepare(
+        `UPDATE threads SET message_count = ?, first_msg = ?, last_msg = ?, is_group = ? WHERE id = ?`
+      ).run(agg.n, agg.first, agg.last, agg.senders > 1 ? 1 : 0, threadId);
+
+      db.prepare(`DELETE FROM participants WHERE thread_id = ?`).run(threadId);
+      const senders = db.prepare(
+        `SELECT DISTINCT sender_id FROM messages WHERE thread_id = ? AND sender_id IS NOT NULL`
+      ).all(threadId);
+      const addP = db.prepare(`INSERT OR IGNORE INTO participants(thread_id, user_id) VALUES(?, ?)`);
+      for (const s of senders) addP.run(threadId, s.sender_id);
+    }
+
+    for (const userId of userIds) {
+      const agg = db.prepare(
+        `SELECT COUNT(*) AS n, MIN(time) AS first, MAX(time) AS last FROM messages WHERE sender_id = ?`
+      ).get(userId);
+      db.prepare(
+        `UPDATE users SET message_count = ?, first_seen = ?, last_seen = ? WHERE id = ?`
+      ).run(agg.n, agg.first, agg.last, userId);
+    }
+  });
+  recompute();
+
+  return { deleted, threadsUpdated: threadIds.size, usersUpdated: userIds.size };
+}
+
 // ---------- query helpers (used by HTTP endpoints) ----------
 export function listThreads(db, { app = null, limit = 200 } = {}) {
   let sql = `SELECT t.id, t.name, t.is_group, t.message_count, t.last_msg,

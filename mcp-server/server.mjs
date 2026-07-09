@@ -22,7 +22,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import QRCode from "qrcode";
-import { openDb, reindex, listThreads, getThread, listUsers, statsSummary } from "./relations.mjs";
+import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages } from "./relations.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
@@ -152,10 +152,16 @@ function dedupCleanup() {
   for (const r of rows) seen.add(keyOf(r));
   fs.writeFileSync(DATA_FILE, keptRows.map((r) => JSON.stringify(r)).join("\n") + "\n");
 
-  // Note: this does not retroactively purge the already-inserted rows from
-  // relations.db (reindex() is insert-only) — Threads/Graph tabs may still
-  // show the old duplicates until that layer gets a real delete path.
-  try { rebuildRelations(); } catch (e) { console.error("[dedup] relations resync failed:", e.message); }
+  // Purge the same rows from relations.db (Threads/Graph tabs, MCP tools) so
+  // they don't keep showing duplicates reindex() would otherwise never remove.
+  try {
+    const rawKeys = removedRows.map((r) => `${r.source}|${r.id}|${r.time}`);
+    const rel = deleteMessages(RDB, rawKeys);
+    console.error(
+      `[dedup] relations.db: deleted ${rel.deleted} messages, ` +
+      `updated ${rel.threadsUpdated} threads, ${rel.usersUpdated} users`
+    );
+  } catch (e) { console.error("[dedup] relations.db cleanup failed:", e.message); }
 
   console.error(
     `[dedup] removed ${removedRows.length} exact-duplicate rows across ${groupsAffected} groups ` +
