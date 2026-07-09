@@ -164,9 +164,9 @@
     },
     {
       "id": "TASK-0008",
-      "title": "PC-as-SSOT with raw-authoritative sync (phased)",
+      "title": "PC-as-SSOT with raw-authoritative sync — phases 1/3/4",
       "category": "Infrastructure",
-      "status": "in_progress",
+      "status": "completed",
       "dependencies": [],
       "required_capability": ["Architecture", "Storage", "Implementation"],
       "complexity": "XL",
@@ -175,11 +175,37 @@
       "parallelizable": true,
       "verification": ["Compiler", "Manual"],
       "priority": 2,
-      "note": "ACR APPROVED 2026-07-09. Non-destructive phases 1/3/4 implemented in parallel by 3 sonnet subagents (server ack, LLM gate, mobile ack+onUpgrade fix). Phase 2 (prune, destructive) deferred. LLM = hf.co/iapp/chinda-qwen3-4b-gguf:Q4_K_M via Ollama.",
-      "produced_outputs": [],
+      "note": "ACR APPROVED 2026-07-09. Dispatched to 3 parallel sonnet worktree-agents. Agent A (server ack) + Agent C (mobile ack + onUpgrade fix) completed and were cherry-picked (f1c7b62, 3c6301e). Agent B (LLM gate) died mid-run on a session restart with an empty worktree; reimplemented directly (eeb393b) and verified against the real Chinda Qwen3-4B model. Integrated Kotlin build + server boot + gate endpoint all verified. Phase 2 (destructive prune) deferred. Follow-ups: wire getVerdict() into relations.mjs parseRow to gate embeddings; tighten the gate ambiguity heuristic (48k lines ~= half corpus, too broad); schedule/run the ~5h backfill deliberately.",
+      "produced_outputs": [
+        "mcp-server/server.mjs",
+        "mcp-server/llm-gate.mjs",
+        "app/src/main/java/com/example/notikeeper/data/Settings.kt",
+        "app/src/main/java/com/example/notikeeper/data/NotiStore.kt",
+        "app/src/main/java/com/example/notikeeper/Exporter.kt",
+        "app/src/main/java/com/example/notikeeper/MainActivity.kt"
+      ],
       "ready": true,
       "created_at": "2026-07-09T12:45:00+07:00",
-      "updated_at": "2026-07-09T12:50:00+07:00"
+      "updated_at": "2026-07-09T14:19:16+07:00"
+    },
+    {
+      "id": "TASK-0009",
+      "title": "Phase 2: on-device prune of acked+aged raw (DESTRUCTIVE — deferred)",
+      "category": "Storage",
+      "status": "pending",
+      "dependencies": ["TASK-0008"],
+      "required_capability": ["Storage", "Implementation"],
+      "complexity": "L",
+      "estimated_context": "Medium",
+      "local_eligibility": "CLOUD_REQUIRED",
+      "parallelizable": false,
+      "verification": ["Compiler", "Manual"],
+      "priority": 3,
+      "note": "Deferred per ACR risk section. Phone deletes raw strictly below the confirmed prunableThroughId AND older than a retention floor (e.g. 7 days). Needs: extensive tests; a real onUpgrade migration (done in TASK-0008); and hardening the empty-batch ackedThroughId fallback (server returns global max on empty batch — harmless today since the phone never uploads empty batches, but must be scoped per-device before prune trusts it).",
+      "produced_outputs": [],
+      "ready": false,
+      "created_at": "2026-07-09T14:19:16+07:00",
+      "updated_at": "2026-07-09T14:19:16+07:00"
     }
   ]
 }
