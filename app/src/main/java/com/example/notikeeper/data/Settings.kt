@@ -1,66 +1,23 @@
 package com.example.notikeeper.data
 
 import android.content.Context
-import android.content.SharedPreferences
-import androidx.security.crypto.EncryptedSharedPreferences
-import androidx.security.crypto.MasterKey
 
 /**
- * Small encrypted settings store (same Keystore-backed file as [DbKey]).
+ * Small encrypted settings store (same Keystore-backed [SecureStore] as [DbKey]).
  * Holds the optional private-cloud upload config + the upload high-water mark.
  */
 object Settings {
-    private fun buildPrefs(appCtx: Context): SharedPreferences {
-        val masterKey = MasterKey.Builder(appCtx)
-            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-            .build()
-        return EncryptedSharedPreferences.create(
-            appCtx,
-            "secure_prefs",
-            masterKey,
-            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-        )
-    }
+    fun getApiUrl(c: Context): String = SecureStore.getString(c, "api_url", "")
+    fun setApiUrl(c: Context, v: String) = SecureStore.putString(c, "api_url", v)
 
-    /**
-     * Open the encrypted prefs, recovering from a corrupted Keystore master
-     * key (AEADBadTagException — happens after backup/restore or partial reset).
-     * When recovery wipes the prefs file the DB passphrase is gone too, so the
-     * encrypted noti.db is also unrecoverable: we delete it next time NotiStore
-     * tries to open it.
-     */
-    private fun prefs(context: Context): SharedPreferences {
-        val appCtx = context.applicationContext
-        return try {
-            buildPrefs(appCtx)
-        } catch (_: Throwable) {
-            // Wipe both the prefs file AND its v1 androidx-security backing
-            // so the master key gets regenerated cleanly on the next call.
-            appCtx.getSharedPreferences("secure_prefs", Context.MODE_PRIVATE).edit().clear().commit()
-            appCtx.deleteSharedPreferences("secure_prefs")
-            try {
-                val ks = java.security.KeyStore.getInstance("AndroidKeyStore")
-                ks.load(null)
-                if (ks.containsAlias("_androidx_security_master_key_")) {
-                    ks.deleteEntry("_androidx_security_master_key_")
-                }
-            } catch (_: Throwable) { /* best effort */ }
-            buildPrefs(appCtx)
-        }
-    }
+    fun getApiToken(c: Context): String = SecureStore.getString(c, "api_token", "")
+    fun setApiToken(c: Context, v: String) = SecureStore.putString(c, "api_token", v)
 
-    fun getApiUrl(c: Context): String = prefs(c).getString("api_url", "") ?: ""
-    fun setApiUrl(c: Context, v: String) = prefs(c).edit().putString("api_url", v).apply()
+    fun getAutoUpload(c: Context): Boolean = SecureStore.getBoolean(c, "auto_upload", false)
+    fun setAutoUpload(c: Context, v: Boolean) = SecureStore.putBoolean(c, "auto_upload", v)
 
-    fun getApiToken(c: Context): String = prefs(c).getString("api_token", "") ?: ""
-    fun setApiToken(c: Context, v: String) = prefs(c).edit().putString("api_token", v).apply()
-
-    fun getAutoUpload(c: Context): Boolean = prefs(c).getBoolean("auto_upload", false)
-    fun setAutoUpload(c: Context, v: Boolean) = prefs(c).edit().putBoolean("auto_upload", v).apply()
-
-    fun getLastUploadedId(c: Context): Long = prefs(c).getLong("last_uploaded_id", 0L)
-    fun setLastUploadedId(c: Context, v: Long) = prefs(c).edit().putLong("last_uploaded_id", v).apply()
+    fun getLastUploadedId(c: Context): Long = SecureStore.getLong(c, "last_uploaded_id", 0L)
+    fun setLastUploadedId(c: Context, v: Long) = SecureStore.putLong(c, "last_uploaded_id", v)
 
     /**
      * Server-confirmed high-water mark: the max row id the PC has durably
@@ -68,9 +25,9 @@ object Settings {
      * (see docs/ARCHITECTURE_CHANGE_REQUEST.md phase 2). Never allowed to
      * move backwards.
      */
-    fun getPrunableThroughId(c: Context): Long = prefs(c).getLong("prunable_through_id", 0L)
+    fun getPrunableThroughId(c: Context): Long = SecureStore.getLong(c, "prunable_through_id", 0L)
     fun setPrunableThroughId(c: Context, v: Long) =
-        prefs(c).edit().putLong("prunable_through_id", maxOf(v, getPrunableThroughId(c))).apply()
+        SecureStore.putLong(c, "prunable_through_id", maxOf(v, getPrunableThroughId(c)))
 
     /**
      * Phase 2 kill switch: pruning only ever runs when the owner explicitly
@@ -78,30 +35,30 @@ object Settings {
      * deleting on-device data until the owner has confirmed the ack protocol
      * behaves correctly on their own data.
      */
-    fun getPruneEnabled(c: Context): Boolean = prefs(c).getBoolean("prune_enabled", false)
-    fun setPruneEnabled(c: Context, v: Boolean) = prefs(c).edit().putBoolean("prune_enabled", v).apply()
+    fun getPruneEnabled(c: Context): Boolean = SecureStore.getBoolean(c, "prune_enabled", false)
+    fun setPruneEnabled(c: Context, v: Boolean) = SecureStore.putBoolean(c, "prune_enabled", v)
 
     /** Retention floor: never prune a row younger than this, even if acked. */
     const val PRUNE_RETENTION_MS = 7L * 24 * 3600_000L
 
     /** Epoch millis of the last successful upload — shown on the Device & Connection screen. */
-    fun getLastSyncTime(c: Context): Long = prefs(c).getLong("last_sync_time", 0L)
-    fun setLastSyncTime(c: Context, v: Long) = prefs(c).edit().putLong("last_sync_time", v).apply()
+    fun getLastSyncTime(c: Context): Long = SecureStore.getLong(c, "last_sync_time", 0L)
+    fun setLastSyncTime(c: Context, v: Long) = SecureStore.putLong(c, "last_sync_time", v)
 
     /** Friendly local label for this device. Empty = not set yet (caller falls back to the device model). */
-    fun getDeviceName(c: Context): String = prefs(c).getString("device_name", "") ?: ""
-    fun setDeviceName(c: Context, v: String) = prefs(c).edit().putString("device_name", v).apply()
+    fun getDeviceName(c: Context): String = SecureStore.getString(c, "device_name", "")
+    fun setDeviceName(c: Context, v: String) = SecureStore.putString(c, "device_name", v)
 
     // Eyes-free read-aloud (driving mode)
-    fun getReadAloudNoti(c: Context): Boolean = prefs(c).getBoolean("read_noti", false)
-    fun setReadAloudNoti(c: Context, v: Boolean) = prefs(c).edit().putBoolean("read_noti", v).apply()
+    fun getReadAloudNoti(c: Context): Boolean = SecureStore.getBoolean(c, "read_noti", false)
+    fun setReadAloudNoti(c: Context, v: Boolean) = SecureStore.putBoolean(c, "read_noti", v)
 
-    fun getReadAloudScreen(c: Context): Boolean = prefs(c).getBoolean("read_screen", false)
-    fun setReadAloudScreen(c: Context, v: Boolean) = prefs(c).edit().putBoolean("read_screen", v).apply()
+    fun getReadAloudScreen(c: Context): Boolean = SecureStore.getBoolean(c, "read_screen", false)
+    fun setReadAloudScreen(c: Context, v: Boolean) = SecureStore.putBoolean(c, "read_screen", v)
 
     /** Packages allowed to be read aloud. Empty set = read every app. */
-    fun getSpeakApps(c: Context): Set<String> = prefs(c).getStringSet("speak_apps", emptySet()) ?: emptySet()
-    fun setSpeakApps(c: Context, v: Set<String>) = prefs(c).edit().putStringSet("speak_apps", v).apply()
+    fun getSpeakApps(c: Context): Set<String> = SecureStore.getStringSet(c, "speak_apps", emptySet())
+    fun setSpeakApps(c: Context, v: Set<String>) = SecureStore.putStringSet(c, "speak_apps", v)
 
     /** True if [pkg] should be spoken: whitelist empty (all) or contains it. */
     fun shouldSpeak(c: Context, pkg: String): Boolean {
@@ -123,8 +80,8 @@ object Settings {
      * user = capture every app.
      */
     fun getCaptureApps(c: Context): Set<String> =
-        prefs(c).getStringSet("capture_apps", DEFAULT_CAPTURE_APPS) ?: DEFAULT_CAPTURE_APPS
-    fun setCaptureApps(c: Context, v: Set<String>) = prefs(c).edit().putStringSet("capture_apps", v).apply()
+        SecureStore.getStringSet(c, "capture_apps", DEFAULT_CAPTURE_APPS)
+    fun setCaptureApps(c: Context, v: Set<String>) = SecureStore.putStringSet(c, "capture_apps", v)
 
     /** True if [pkg] should be captured: default/whitelist contains it, or the whitelist was explicitly cleared (= all). */
     fun shouldCapture(c: Context, pkg: String): Boolean {
@@ -137,7 +94,6 @@ object Settings {
     // install can auto-check for updates without the user pasting anything.
     const val DEFAULT_UPDATE_URL =
         "https://github.com/Freshair129/notikeeper/releases/latest/download/version.json"
-    fun getUpdateUrl(c: Context): String =
-        prefs(c).getString("update_url", DEFAULT_UPDATE_URL) ?: DEFAULT_UPDATE_URL
-    fun setUpdateUrl(c: Context, v: String) = prefs(c).edit().putString("update_url", v).apply()
+    fun getUpdateUrl(c: Context): String = SecureStore.getString(c, "update_url", DEFAULT_UPDATE_URL)
+    fun setUpdateUrl(c: Context, v: String) = SecureStore.putString(c, "update_url", v)
 }

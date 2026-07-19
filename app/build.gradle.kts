@@ -50,7 +50,11 @@ dependencies {
     implementation("net.zetetic:android-database-sqlcipher:4.5.4")
     implementation("androidx.sqlite:sqlite-ktx:2.4.0")
 
-    // Keystore-backed storage for the DB passphrase
+    // Deprecated (no further releases) — kept only so SecureStore's migration
+    // path can decrypt pre-existing installs' data on first run of this
+    // version. New reads/writes go through SecureStore's own Keystore code
+    // instead. Safe to remove once this install (and any others) have
+    // migrated — see data/SecureStore.kt.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // App lock: fingerprint / device PIN

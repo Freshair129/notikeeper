@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pre-Android-12 (API 30-31) full-backup exclusion. minSdk is 30, which
+  predates dataExtractionRules (API 31+), so this legacy mechanism covers the
+  gap. See data_extraction_rules.xml for why these files are excluded.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="secure_store.xml" />
+    <exclude domain="sharedpref" path="secure_prefs.xml" />
+</full-backup-content>
