@@ -24,6 +24,7 @@
 import fs   from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isSharedChromeLabel } from "./noise.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
@@ -257,7 +258,7 @@ function isJunkMsg(text) {
   const t = text.trim();
   if (!t) return true;
   if (t.length < 2) return true;
-  if (CHROME_EXACT.has(t)) return true;
+  if (isSharedChromeLabel(t) || CHROME_EXACT.has(t)) return true;
   for (const re of CHROME_MSG_RE) if (re.test(t)) return true;
   // Single-word Thai/English label ≤ 12 chars (same rule as adb-scraper isChrome)
   if (/^[\p{L}\p{M}]{1,12}$/u.test(t)) return true;

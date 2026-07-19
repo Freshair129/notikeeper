@@ -24,6 +24,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { searchLexical } from "./relations.mjs";
+import { OLLAMA_URL } from "./config.mjs";
 
 const require = createRequire(import.meta.url);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -62,7 +63,6 @@ const EMBED_DIM = 1024;
 // the only way to drop the stale per-fragment vectors. See buildTurns().
 const COLLECTION = "turns";
 const TURNS_PATH = path.join(__dirname, "turns.json");
-const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 
 /** Get one embedding from Ollama. Returns a Float32Array of length EMBED_DIM. */
 export async function embed(text) {
