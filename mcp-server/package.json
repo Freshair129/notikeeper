@@ -7,6 +7,9 @@
   "bin": {
     "notikeeper-mcp": "server.mjs"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "better-sqlite3": "^12.11.1",

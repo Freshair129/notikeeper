@@ -27,12 +27,12 @@ import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
 import { runGate } from "./llm-gate.mjs";
+import { BIND_HOST, LOCALHOST, LOOPBACK_HOST, PORT } from "./config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
 const DASHBOARD_FILE = path.join(__dirname, "dashboard.html");
 const CHATLOG_DIR = path.join(__dirname, "chatlog");
-const PORT = parseInt(process.env.NOTIKEEPER_PORT || "8765", 10);
 const TOKEN = process.env.NOTIKEEPER_TOKEN || "";
 const CONFIG_FILE = path.join(__dirname, "config.json");
 
@@ -200,7 +200,7 @@ function getLanIp() {
       if (ip.startsWith("192.168.") || ip.startsWith("10.")) return ip;
     }
   }
-  return "127.0.0.1";
+  return LOOPBACK_HOST;
 }
 
 // ---------- noise rules (configurable via NOTIKEEPER_NOISE_OFF=1 to disable) ----------
@@ -239,6 +239,11 @@ function classifyNoise(r) {
   if (PROMO_RE.test(text) || PROMO_RE.test(title)) return "promo";
   if (PROMO_APPS.has(app) && r.source === "noti") return "promo-app";
   return null; // not noise
+}
+
+function sendJson(res, code, obj, contentType = "application/json") {
+  res.writeHead(code, { "Content-Type": contentType });
+  res.end(JSON.stringify(obj));
 }
 
 const isNoise = (r) => classifyNoise(r) !== null;
@@ -281,8 +286,7 @@ const httpServer = http.createServer((req, res) => {
   // 1) Upload endpoint (the phone POSTs here)
   if (req.method === "POST" && url.pathname === "/ingest") {
     if (TOKEN && req.headers["authorization"] !== `Bearer ${TOKEN}`) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end('{"error":"unauthorized"}');
+      sendJson(res, 401, { error: "unauthorized" });
       return;
     }
     const deviceName = (() => {
@@ -315,12 +319,10 @@ const httpServer = http.createServer((req, res) => {
         // device's un-acked local rows, since local row ids are independent
         // per-install SQLite autoincrement counters, not a global sequence.
         const ackedThroughId = maxId(batch) ?? maxId(rows) ?? 0;
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, received: n, total: rows.length, ackedThroughId }));
+        sendJson(res, 200, { ok: true, received: n, total: rows.length, ackedThroughId });
         console.error(`[notikeeper-mcp] ingested ${n} new (total ${rows.length})`);
       } catch (e) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(e) }));
+        sendJson(res, 400, { error: String(e) });
       }
     });
     return;
@@ -350,8 +352,7 @@ const httpServer = http.createServer((req, res) => {
     const authHeader = req.headers["authorization"];
     const queryToken = url.searchParams.get("token");
     if (authHeader !== `Bearer ${TOKEN}` && queryToken !== TOKEN) {
-      res.writeHead(401, { "Content-Type": "application/json" });
-      res.end('{"error":"unauthorized"}');
+      sendJson(res, 401, { error: "unauthorized" });
       return;
     }
   }
@@ -371,8 +372,7 @@ const httpServer = http.createServer((req, res) => {
       sinceId: parseInt(url.searchParams.get("sinceId") || "0", 10) || 0,
       denoise: url.searchParams.get("denoise") === "1",
     }).sort(byNewest).slice(0, limit);
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ total: filtered.length, all: rows.length, rows: filtered }));
+    sendJson(res, 200, { total: filtered.length, all: rows.length, rows: filtered }, "application/json; charset=utf-8");
     return;
   }
 
@@ -391,8 +391,7 @@ const httpServer = http.createServer((req, res) => {
       })
       .filter(Boolean)
       .sort((a, b) => b.to - a.to);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(threads));
+    sendJson(res, 200, threads);
     return;
   }
 
@@ -408,8 +407,7 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/api/chatlog/rebuild") {
-    res.writeHead(202, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "rebuilding" }));
+    sendJson(res, 202, { status: "rebuilding" });
     // Run rebuild in background — stderr goes to server's stderr (not stdout/MCP)
     spawn(process.execPath, [path.join(__dirname, "rebuild-chatlog.mjs")],
       { stdio: ["ignore", "ignore", "inherit"], detached: false });
@@ -435,8 +433,7 @@ const httpServer = http.createServer((req, res) => {
         count:  d.count,
         topApp: Object.entries(d.apps).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "",
       }));
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ days, total: filtered.length }));
+    sendJson(res, 200, { days, total: filtered.length }, "application/json; charset=utf-8");
     return;
   }
 
@@ -455,8 +452,7 @@ const httpServer = http.createServer((req, res) => {
       const tag = classifyNoise(r);
       if (tag) { noiseCount++; byNoise[tag] = (byNoise[tag] || 0) + 1; }
     }
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({
+    sendJson(res, 200, {
       total: rows.length,
       noiseCount,
       cleanCount: rows.length - noiseCount,
@@ -466,7 +462,7 @@ const httpServer = http.createServer((req, res) => {
       bySource,
       minTime: rows.length ? min : null,
       maxTime: rows.length ? max : null,
-    }));
+    }, "application/json; charset=utf-8");
     return;
   }
 
@@ -476,39 +472,33 @@ const httpServer = http.createServer((req, res) => {
       app: url.searchParams.get("app") || null,
       limit: Math.min(parseInt(url.searchParams.get("limit") || "200", 10), 2000),
     });
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ count: out.length, threads: out }));
+    sendJson(res, 200, { count: out.length, threads: out }, "application/json; charset=utf-8");
     return;
   }
   if (req.method === "GET" && url.pathname.startsWith("/api/threads/")) {
     const id = parseInt(url.pathname.split("/").pop(), 10);
     const t = getThread(RDB, id, { limit: parseInt(url.searchParams.get("limit") || "500", 10) });
-    res.writeHead(t ? 200 : 404, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(t || { error: "not found" }));
+    sendJson(res, t ? 200 : 404, t || { error: "not found" }, "application/json; charset=utf-8");
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/users") {
     const out = listUsers(RDB, { limit: parseInt(url.searchParams.get("limit") || "200", 10) });
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ count: out.length, users: out }));
+    sendJson(res, 200, { count: out.length, users: out }, "application/json; charset=utf-8");
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/relations") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(statsSummary(RDB)));
+    sendJson(res, 200, statsSummary(RDB), "application/json; charset=utf-8");
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/relations/rebuild") {
     const r = rebuildRelations();
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(r));
+    sendJson(res, 200, r, "application/json; charset=utf-8");
     return;
   }
 
   if (req.method === "POST" && url.pathname === "/api/dedup/rebuild") {
     const r = dedupCleanup();
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ ok: true, ...r }));
+    sendJson(res, 200, { ok: true, ...r }, "application/json; charset=utf-8");
     return;
   }
 
@@ -519,8 +509,8 @@ const httpServer = http.createServer((req, res) => {
   if (req.method === "POST" && url.pathname === "/api/gate/run") {
     const limit = parseInt(url.searchParams.get("limit") || "200", 10);
     runGate({ limit }).then(
-      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, ...r })); },
-      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+      (r) => { sendJson(res, 200, { ok: true, ...r }); },
+      (e) => { sendJson(res, 500, { error: String(e) }); }
     );
     return;
   }
@@ -528,15 +518,15 @@ const httpServer = http.createServer((req, res) => {
   // Graph (GenesisBlock) — vector+graph layer over the SQLite relations
   if (req.method === "POST" && url.pathname === "/api/graph/rebuild") {
     rebuildGraph(RDB).then(
-      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(r)); },
-      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+      (r) => { sendJson(res, 200, r); },
+      (e) => { sendJson(res, 500, { error: String(e) }); }
     );
     return;
   }
   if (req.method === "GET" && url.pathname === "/api/graph/status") {
     graphStatus().then(
-      (s) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(s)); },
-      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+      (s) => { sendJson(res, 200, s); },
+      (e) => { sendJson(res, 500, { error: String(e) }); }
     );
     return;
   }
@@ -547,8 +537,8 @@ const httpServer = http.createServer((req, res) => {
       rel: url.searchParams.get("rel") || undefined,
       limit: parseInt(url.searchParams.get("limit") || "50", 10),
     }).then(
-      (out) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ seed, count: out.length, neighbors: out })); },
-      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+      (out) => { sendJson(res, 200, { seed, count: out.length, neighbors: out }); },
+      (e) => { sendJson(res, 500, { error: String(e) }); }
     );
     return;
   }
@@ -705,11 +695,9 @@ const httpServer = http.createServer((req, res) => {
         }
       }
 
-      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-      res.end(JSON.stringify({ nodes, edges, counts: { nodes: nodes.length, edges: edges.length } }));
+      sendJson(res, 200, { nodes, edges, counts: { nodes: nodes.length, edges: edges.length } }, "application/json; charset=utf-8");
     } catch (e) {
-      res.writeHead(500, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: String(e) }));
+      sendJson(res, 500, { error: String(e) });
     }
     return;
   }
@@ -720,8 +708,8 @@ const httpServer = http.createServer((req, res) => {
         if (done % 50 === 0) console.error(`[embed] ${done}/${total} (${failed} failed)`);
       },
     }).then(
-      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify(r)); },
-      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+      (r) => { sendJson(res, 200, r); },
+      (e) => { sendJson(res, 500, { error: String(e) }); }
     );
     return;
   }
@@ -731,15 +719,14 @@ const httpServer = http.createServer((req, res) => {
     // mode=hybrid (default) → RRF(dense+sparse); mode=semantic → vector only.
     const mode = url.searchParams.get("mode") || "hybrid";
     if (!q.trim()) {
-      res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "q is required" })); return;
+      sendJson(res, 400, { error: "q is required" }); return;
     }
     const run = mode === "semantic"
       ? searchSemantic(q, { k })
       : searchHybridRRF(RDB, q, { k });
     run.then(
-      (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ q, mode, count: r.length, hits: r })); },
-      (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+      (r) => { sendJson(res, 200, { q, mode, count: r.length, hits: r }); },
+      (e) => { sendJson(res, 500, { error: String(e) }); }
     );
     return;
   }
@@ -749,8 +736,8 @@ const httpServer = http.createServer((req, res) => {
     req.on("end", () => {
       const q = (() => { try { return JSON.parse(body).query; } catch { return body; } })();
       graphHql(q).then(
-        (r) => { res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ query: q, result: r })); },
-        (e) => { res.writeHead(500, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: String(e) })); }
+        (r) => { sendJson(res, 200, { query: q, result: r }); },
+        (e) => { sendJson(res, 500, { error: String(e) }); }
       );
     });
     return;
@@ -771,16 +758,14 @@ const httpServer = http.createServer((req, res) => {
       updateUrl,
       ...(CONFIG.captureApps.length ? { captureApps: CONFIG.captureApps } : {}),
     };
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(payload));
+    sendJson(res, 200, payload, "application/json; charset=utf-8");
     return;
   }
 
   // Shared mobile config (e.g. default capture-app whitelist), read/written by
   // the PC dashboard and pushed to the phone via /api/pair(-qr) above.
   if (req.method === "GET" && url.pathname === "/api/config") {
-    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(CONFIG));
+    sendJson(res, 200, CONFIG, "application/json; charset=utf-8");
     return;
   }
   if (req.method === "POST" && url.pathname === "/api/config") {
@@ -793,11 +778,9 @@ const httpServer = http.createServer((req, res) => {
           CONFIG.captureApps = parsed.captureApps.filter((s) => typeof s === "string");
           saveConfig();
         }
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ ok: true, config: CONFIG }));
+        sendJson(res, 200, { ok: true, config: CONFIG });
       } catch (e) {
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: String(e) }));
+        sendJson(res, 400, { error: String(e) });
       }
     });
     return;
@@ -850,7 +833,7 @@ const httpServer = http.createServer((req, res) => {
 });
 
 httpServer.listen(PORT, () =>
-  console.error(`[notikeeper-mcp] HTTP on http://0.0.0.0:${PORT}  (dashboard /, ingest /ingest, events /events)`)
+  console.error(`[notikeeper-mcp] HTTP on http://${BIND_HOST}:${PORT}  (dashboard /, ingest /ingest, events /events)`)
 );
 
 // ---------- MCP tools (same data, also exposed to Claude) ----------
@@ -893,7 +876,7 @@ mcp.tool("stats", {}, async () => {
     `total rows: ${rows.length}`,
     `by source: ${JSON.stringify(bySource)}`,
     rows.length ? `range: ${new Date(min).toLocaleString()} -> ${new Date(max).toLocaleString()}` : "range: -",
-    `dashboard: http://localhost:${PORT}/`,
+    `dashboard: http://${LOCALHOST}:${PORT}/`,
     `data file: ${DATA_FILE}`,
   ].join("\n");
   return { content: [{ type: "text", text }] };

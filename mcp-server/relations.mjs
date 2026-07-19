@@ -13,6 +13,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getVerdict } from "./llm-gate.mjs";
+import { isSharedChromeLabel } from "./noise.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -57,7 +58,7 @@ const UI_PATTERNS = [
 function looksLikeChromeLabel(text) {
   const t = (text || "").trim();
   if (!t) return true;
-  if (CHROME_WORDS.has(t)) return true;
+  if (isSharedChromeLabel(t) || CHROME_WORDS.has(t)) return true;
   if (t.length <= 2) return true;                       // single char / emoji button
   if (/^[\p{L}]{1,16}$/u.test(t)) return true;          // single short word (no whitespace)
   for (const re of UI_PATTERNS) if (re.test(t)) return true;

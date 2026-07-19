@@ -30,11 +30,11 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { OLLAMA_URL } from "./config.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
 const CACHE_FILE = path.join(__dirname, "llm-verdicts.json");
-const OLLAMA_URL = process.env.OLLAMA_URL || "http://localhost:11434";
 const MODEL = process.env.NOTIKEEPER_GATE_MODEL || "hf.co/iapp/chinda-qwen3-4b-gguf:Q4_K_M";
 
 const argv = process.argv.slice(2);
