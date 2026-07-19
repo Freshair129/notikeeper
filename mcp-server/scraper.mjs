@@ -33,6 +33,7 @@
  * capturing *new* messages before they can be deleted.
  */
 import { execFileSync } from "node:child_process";
+import { detectLegacyTitle, extractLegacyMessage, fetchExistingMessages, isLegacyChrome, legacySideOf, parseLegacyAnchor, parseLegacyTextNodes, postJsonIngest, sleep } from "./adb-lib.mjs";
 
 const arg = (name, def = null) => {
   const i = process.argv.indexOf(name);
@@ -55,7 +56,6 @@ function adb(args, { binary = false } = {}) {
   });
 }
 
-function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
 /** Screen size → {w,h}. */
 function screenSize() {
@@ -72,7 +72,7 @@ function dumpUI() {
 }
 
 /** Very small attribute extractor for uiautomator <node .../> elements. */
-function parseNodes(xml) {
+function localParseNodes(xml) {
   const nodes = [];
   const re = /<node\b([^>]*?)\/?>/g;
   let m;
@@ -97,7 +97,7 @@ function decodeEntities(s) {
 }
 
 /** Conversation title = the highest short text in the top app-bar zone. */
-function detectTitle(nodes, h) {
+function localDetectTitle(nodes, h) {
   const top = nodes.filter((n) => n.y2 < h * 0.13 && n.text.length <= 40);
   top.sort((a, b) => a.y1 - b.y1);
   // skip obvious chrome
@@ -130,7 +130,7 @@ const ANCHOR_TIME_RE = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i;
  * Pattern: "<Sender>, <message body>, double tap to see ..."
  * Returns null if it isn't a message bubble.
  */
-function extractMessage(rawText) {
+function localExtractMessage(rawText) {
   let t = rawText.trim();
   if (!BOILERPLATE_RE.test(t)) return null;            // only real bubbles carry this
   t = t.replace(BOILERPLATE_RE, "");                   // -> "Sender, body"
@@ -143,7 +143,7 @@ function extractMessage(rawText) {
 }
 
 /** Resolve a time/date anchor to epoch-ms (best effort), else null. */
-function parseAnchor(rawText, now = Date.now()) {
+function localParseAnchor(rawText, now = Date.now()) {
   const t = rawText.trim();
   let m = t.match(ANCHOR_FULL_RE);
   let hh, mm, ap, dayKey = null;
@@ -165,17 +165,17 @@ function parseAnchor(rawText, now = Date.now()) {
   return d.getTime();
 }
 
-function isChrome(t) {
+function localIsChrome(t) {
   const s = t.trim();
   return !s || CHROME.has(s) || CHROME_RE.test(s);
 }
 
 /** side from horizontal position: right half = me, left = them. */
-function sideOf(n, w) {
+function localSideOf(n, w) {
   return n.cx > w * 0.55 ? "me" : "them";
 }
 
-async function fetchExistingKeys() {
+async function localFetchExistingKeys() {
   // Pull current Messenger rows so re-runs don't double-post identical lines.
   try {
     const r = await fetch(INGEST.replace("/ingest", "/api/messages") + "?app=Messenger&limit=10000");
@@ -192,7 +192,7 @@ async function main() {
   const { w, h } = screenSize();
   console.log(`[scraper] screen ${w}x${h}`);
 
-  const existing = await fetchExistingKeys();
+  const existing = await fetchExistingMessages(INGEST, 10000);
   console.log(`[scraper] ${existing.size} Messenger rows already on server`);
 
   const collected = new Map();   // key -> {title, side, sender, text, time}
@@ -201,8 +201,8 @@ async function main() {
 
   for (let round = 0; round < ROUNDS; round++) {
     const xml = dumpUI();
-    const nodes = parseNodes(xml);
-    if (round === 0) title = detectTitle(nodes, h);
+    const nodes = parseLegacyTextNodes(xml);
+    if (round === 0) title = detectLegacyTitle(nodes, h, CHROME, 0.13);
 
     // Walk nodes top→bottom (older→newer); track the most recent time anchor seen
     // above so each message inherits an approximate timestamp.
@@ -212,12 +212,12 @@ async function main() {
     for (const n of nodes) {
       const raw = n.text.trim();
       if (n.y2 < h * 0.12 || n.y1 > h * 0.90) continue;   // app bar / composer
-      const a = parseAnchor(raw);
+      const a = parseLegacyAnchor(raw);
       if (a) { curAnchor = a; continue; }
-      const msg = extractMessage(raw);
+      const msg = extractLegacyMessage(raw);
       if (!msg) continue;
-      if (isChrome(msg.body)) continue;
-      const side = sideOf(n, w);
+      if (isLegacyChrome(msg.body, CHROME, CHROME_RE)) continue;
+      const side = legacySideOf(n, w);
       const key = `${title}|${side}|${msg.body}`;
       if (existing.has(key) || collected.has(key)) continue;
       collected.set(key, { title, side, sender: msg.sender, text: msg.body, time: curAnchor });
@@ -262,13 +262,8 @@ async function main() {
     time_exact: false,
   }));
 
-  const res = await fetch(INGEST, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const out = await res.json().catch(() => ({}));
-  console.log(`[scraper] POST -> ${res.status} ${JSON.stringify(out)}`);
+  const { response, body } = await postJsonIngest(INGEST, payload);
+  console.log(`[scraper] POST -> ${response.status} ${JSON.stringify(body)}`);
 }
 
 main().catch((e) => { console.error("[scraper] FAILED:", e.message); process.exit(1); });

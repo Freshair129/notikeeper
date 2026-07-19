@@ -20,6 +20,7 @@ import { execSync, execFileSync } from "node:child_process";
 import http from "node:http";
 import https from "node:https";
 import crypto from "node:crypto";
+import { decodeXmlEntities, sleep } from "./adb-lib.mjs";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const INGEST_URL   = process.env.INGEST_URL || "http://localhost:8765/ingest";
@@ -91,23 +92,10 @@ function adbDump() {
   });
 }
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 // ── XML node parser ───────────────────────────────────────────────────────────
 const ATTR_RE   = /(\w[\w-]*)="([^"]*)"/g;
 const BOUNDS_RE = /\[(\d+),(\d+)\]\[(\d+),(\d+)\]/;
-
-function unesc(s) {
-  return s
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#10;/g, "\n");
-}
 
 function parseNodes(xml) {
   const nodes = [];
@@ -126,8 +114,8 @@ function parseNodes(xml) {
     if (!b) continue;
     const x1 = +b[1], y1 = +b[2], x2 = +b[3], y2 = +b[4];
     nodes.push({
-      text:        unesc(attrs.text         || ""),
-      desc:        unesc(attrs["content-desc"] || ""),
+      text:        decodeXmlEntities(attrs.text         || "", true),
+      desc:        decodeXmlEntities(attrs["content-desc"] || "", true),
       resourceId:  attrs["resource-id"]    || "",
       cls:         attrs.class             || "",
       x1, y1, x2, y2,
