@@ -17,11 +17,12 @@
  */
 import { execFileSync } from "node:child_process";
 import { detectLegacyTitle, extractLegacyMessage, fetchExistingMessages, isLegacyChrome, LEGACY_BUBBLE_RE, legacySideOf, parseLegacyAnchor, parseLegacyTextNodes, postJsonIngest, sleep } from "./adb-lib.mjs";
+import { DEFAULT_INGEST_URL } from "./config.mjs";
 
 const arg = (n, d = null) => { const i = process.argv.indexOf(n); if (i === -1) return d; const v = process.argv[i + 1]; return v && !v.startsWith("--") ? v : true; };
 const ADB = process.env.ADB || "D:\\abuild\\sdk\\platform-tools\\adb.exe";
 const DEVICE = process.env.ADB_DEVICE || "192.168.1.107:38721";
-const INGEST = process.env.INGEST || "http://localhost:8765/ingest";
+const INGEST = process.env.INGEST || DEFAULT_INGEST_URL;
 const MAX_THREADS = parseInt(arg("--max", "30"), 10);
 const ROUNDS = parseInt(arg("--rounds", "60"), 10);
 const DRY = !!arg("--dry", false);

@@ -34,6 +34,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { detectLegacyTitle, extractLegacyMessage, fetchExistingMessages, isLegacyChrome, legacySideOf, parseLegacyAnchor, parseLegacyTextNodes, postJsonIngest, sleep } from "./adb-lib.mjs";
+import { DEFAULT_INGEST_URL } from "./config.mjs";
 
 const arg = (name, def = null) => {
   const i = process.argv.indexOf(name);
@@ -44,7 +45,7 @@ const arg = (name, def = null) => {
 
 const ADB = process.env.ADB || "D:\\abuild\\sdk\\platform-tools\\adb.exe";
 const DEVICE = process.env.ADB_DEVICE || "192.168.1.107:35417";
-const INGEST = process.env.INGEST || "http://localhost:8765/ingest";
+const INGEST = process.env.INGEST || DEFAULT_INGEST_URL;
 const ROUNDS = parseInt(arg("--rounds", "40"), 10);
 const DRY = !!arg("--dry", false);
 const SETTLE_MS = 700;          // wait after each swipe for the list to settle
