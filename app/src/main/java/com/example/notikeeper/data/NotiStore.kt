@@ -2,8 +2,10 @@ package com.example.notikeeper.data
 
 import android.content.ContentValues
 import android.content.Context
+import android.database.sqlite.SQLiteException
 import net.sqlcipher.database.SQLiteDatabase
 import net.sqlcipher.database.SQLiteOpenHelper
+import java.io.File
 
 /** One captured row. `source` = "noti" (from notification) or "screen" (from accessibility read). */
 data class NotiItem(
@@ -173,7 +175,15 @@ class NotiStore private constructor(
         )
     }
 
-    /** Rows with id greater than [afterId], oldest first. Pass -1 for everything (export). */
+    /**
+     * Rows with id greater than [afterId], oldest first, capped at 20000.
+     *
+     * That cap is deliberate and fine for its real caller — upload, which bounds
+     * each HTTP POST body (see /ingest's own 50MB limit) and naturally continues
+     * from wherever the high-water mark left off on the next call. It is NOT
+     * fine for export, which must produce the whole archive or say clearly what
+     * it left out — [allRows] below is the uncapped, streaming path for that.
+     */
     fun querySince(afterId: Long): List<NotiItem> {
         val cursor = database.rawQuery(
             "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications " +
@@ -198,6 +208,44 @@ class NotiStore private constructor(
             }
         }
         return result
+    }
+
+    /**
+     * Every row, oldest id first, as a lazy sequence backed directly by a DB
+     * cursor — no cap, and the full result is never materialized as a List the
+     * way querySince's is. Exporter drives this straight into a file/stream
+     * writer so a large archive never has to fit in memory either as rows or
+     * as the serialized JSON/CSV built from them.
+     *
+     * The cursor is opened when the sequence starts being consumed and closed
+     * (via [android.database.Cursor.use]) once it's exhausted OR if the
+     * consumer stops early / throws — standard behavior for a `sequence {}`
+     * builder wrapping a `use` block, since cancelling the underlying
+     * coroutine still runs the `finally` inside it. Must be consumed
+     * synchronously and to completion by its caller in one linear walk (which
+     * every writer in Exporter.kt does) — do not store this sequence or
+     * iterate it across suspension points.
+     */
+    fun allRows(): Sequence<NotiItem> = sequence {
+        database.rawQuery(
+            "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications ORDER BY id ASC",
+            null
+        ).use { cursor ->
+            while (cursor.moveToNext()) {
+                yield(
+                    NotiItem(
+                        id = cursor.getLong(0),
+                        source = cursor.getString(1),
+                        pkg = cursor.getString(2),
+                        appName = cursor.getString(3),
+                        title = cursor.getString(4),
+                        text = cursor.getString(5),
+                        side = cursor.getString(6),
+                        postTime = cursor.getLong(7)
+                    )
+                )
+            }
+        }
     }
 
     /** Every message in one conversation (same pkg + title), newest first — for the thread detail view. */
@@ -356,6 +404,18 @@ class NotiStore private constructor(
         @Volatile
         private var instance: NotiStore? = null
 
+        /**
+         * Set once, at most, per process — by [get] below, if opening the
+         * existing database ever fails. Null the rest of the time. A UI screen
+         * reads this after calling [get] and should show it once, then call
+         * [clearRecoveryNotice] so it doesn't reappear on the next resume.
+         */
+        @Volatile
+        var lastRecoveryNotice: String? = null
+            private set
+
+        fun clearRecoveryNotice() { lastRecoveryNotice = null }
+
         fun get(context: Context): NotiStore =
             instance ?: synchronized(this) {
                 instance ?: run {
@@ -364,14 +424,30 @@ class NotiStore private constructor(
                     val passphrase = DbKey.getOrCreate(appCtx)
                     val store = try {
                         NotiStore(appCtx, passphrase).also { it.database.rawQuery("SELECT 1", null).close() }
-                    } catch (_: Throwable) {
-                        // Passphrase no longer matches the on-disk DB (e.g. after
-                        // a Keystore key reset wiped the saved DB key). Drop the
-                        // db so the user can keep using the app; the data on PC
-                        // (data.jsonl) is the recovery path.
-                        appCtx.getDatabasePath("noti.db").let { f ->
-                            f.delete(); java.io.File(f.path + "-journal").delete()
+                    } catch (e: SQLiteException) {
+                        // The on-disk DB doesn't open with the current passphrase —
+                        // almost always a Keystore key loss/reset (SecureStore's
+                        // isolated db_pass store failing to decrypt, or a factory
+                        // reset / restore mismatch; see SECURITY.md). Narrowed from
+                        // catching every Throwable: a transient I/O error, a full
+                        // disk, or an OOM during this probe query is NOT "the
+                        // passphrase is wrong" and must not trigger what follows.
+                        //
+                        // Move the unreadable file aside — never delete it. It may
+                        // still hold years of archive; someone with the old
+                        // Keystore key (a restored backup, a reinstalled matching
+                        // key alias) could still recover it later, and even
+                        // without that, deleting silently is strictly worse than
+                        // deleting-with-a-name-you-can-find. The app still starts
+                        // usable, on a fresh empty database with the current key.
+                        val dbFile = appCtx.getDatabasePath("noti.db")
+                        val quarantineBase = "${dbFile.path}.unreadable-${System.currentTimeMillis()}"
+                        for (suffix in listOf("", "-journal", "-wal", "-shm")) {
+                            val src = File(dbFile.path + suffix)
+                            if (src.exists()) src.renameTo(File(quarantineBase + suffix))
                         }
+                        lastRecoveryNotice = "เปิดฐานข้อมูลเดิมไม่ได้ (กุญแจไม่ตรง) — " +
+                            "เริ่มฐานข้อมูลใหม่แล้ว ไฟล์เดิมสำรองไว้ที่ ${File(quarantineBase).name}"
                         NotiStore(appCtx, passphrase)
                     }
                     instance = store

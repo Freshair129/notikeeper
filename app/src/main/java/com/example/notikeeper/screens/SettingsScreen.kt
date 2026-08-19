@@ -359,9 +359,15 @@ private fun BackupExportScreen(onClose: () -> Unit) {
             Button(
                 onClick = {
                     scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
                         AppLock.suppressNextLock = true
-                        Exporter.share(ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all))
+                        // Whole archive, uncapped (NotiStore.allRows — see its doc comment for why
+                        // this differs from querySince) streamed straight into the export file, so
+                        // the row count here doesn't bound how much can be shared out.
+                        withContext(Dispatchers.IO) {
+                            Exporter.share(ctx, "notikeeper.json", "application/json") { writer ->
+                                Exporter.writeJsonRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -370,9 +376,12 @@ private fun BackupExportScreen(onClose: () -> Unit) {
             Button(
                 onClick = {
                     scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
                         AppLock.suppressNextLock = true
-                        Exporter.share(ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all))
+                        withContext(Dispatchers.IO) {
+                            Exporter.share(ctx, "notikeeper.csv", "text/csv") { writer ->
+                                Exporter.writeCsvRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -381,14 +390,19 @@ private fun BackupExportScreen(onClose: () -> Unit) {
             OutlinedButton(
                 onClick = {
                     scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
-                        val okJson = Exporter.saveToDownloads(
-                            ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all)
-                        )
-                        val okCsv = Exporter.saveToDownloads(
-                            ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all)
-                        )
-                        status = if (okJson && okCsv) "บันทึกลง Downloads แล้ว (${all.size} รายการ)"
+                        var rowCount = 0
+                        val (okJson, okCsv) = withContext(Dispatchers.IO) {
+                            val json = Exporter.saveToDownloads(ctx, "notikeeper.json", "application/json") { writer ->
+                                rowCount = Exporter.writeJsonRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                            val csv = Exporter.saveToDownloads(ctx, "notikeeper.csv", "text/csv") { writer ->
+                                Exporter.writeCsvRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                            json to csv
+                        }
+                        // rowCount is the true total — allRows() has no cap, so unlike before,
+                        // this count can never be a truncated fraction of the real archive.
+                        status = if (okJson && okCsv) "บันทึกลง Downloads แล้ว ($rowCount รายการ)"
                         else "บันทึกไม่สำเร็จ"
                     }
                 },

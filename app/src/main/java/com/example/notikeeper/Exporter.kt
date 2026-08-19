@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.Writer
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -20,40 +21,33 @@ import java.net.URLEncoder
  *  - share()           -> system share sheet (Google Drive, Gmail, Nearby, send-to-PC apps…)
  *  - saveToDownloads() -> a copy in the public Downloads folder
  *  - uploadJson()      -> POST to the user's own private endpoint
+ *
+ * share() and saveToDownloads() take a writer callback rather than a
+ * pre-built String: the export buttons drive NotiStore.allRows() (an
+ * uncapped, cursor-backed sequence) straight into the destination file, so a
+ * large archive never has to exist twice over in memory — once as rows, once
+ * as the whole serialized payload. uploadJson() still takes a String body:
+ * an HTTP POST needs one anyway, and its caller (the capped querySince/
+ * upload-batch path) is bounded by design, unlike export.
  */
 object Exporter {
 
-    fun itemsToJson(items: List<NotiItem>): String {
-        val arr = JSONArray()
-        for (it in items) {
-            arr.put(
-                JSONObject().apply {
-                    put("id", it.id)
-                    put("source", it.source)
-                    put("app", it.appName)
-                    put("pkg", it.pkg)
-                    put("title", it.title)
-                    put("text", it.text)
-                    put("side", it.side)
-                    put("time", it.postTime)
-                }
-            )
-        }
-        return arr.toString(2)
+    private fun rowToJson(it: NotiItem): JSONObject = JSONObject().apply {
+        put("id", it.id)
+        put("source", it.source)
+        put("app", it.appName)
+        put("pkg", it.pkg)
+        put("title", it.title)
+        put("text", it.text)
+        put("side", it.side)
+        put("time", it.postTime)
     }
 
-    fun itemsToCsv(items: List<NotiItem>): String {
-        val sb = StringBuilder("id,source,app,title,text,side,time\n")
-        for (it in items) {
-            sb.append(it.id).append(',')
-                .append(csv(it.source)).append(',')
-                .append(csv(it.appName)).append(',')
-                .append(csv(it.title)).append(',')
-                .append(csv(it.text)).append(',')
-                .append(csv(it.side)).append(',')
-                .append(it.postTime).append('\n')
-        }
-        return sb.toString()
+    /** Used by the upload path, which POSTs a bounded batch as one JSON body. */
+    fun itemsToJson(items: List<NotiItem>): String {
+        val arr = JSONArray()
+        for (it in items) arr.put(rowToJson(it))
+        return arr.toString(2)
     }
 
     private fun csv(s: String): String {
@@ -62,11 +56,44 @@ object Exporter {
         return if (needsQuote) "\"$escaped\"" else escaped
     }
 
-    /** Write to cache and fire the system share sheet. */
-    fun share(context: Context, fileName: String, mime: String, content: String) {
+    /** Streams [rows] to [writer] as a JSON array, one object at a time. Returns the row count. */
+    fun writeJsonRows(writer: Writer, rows: Sequence<NotiItem>): Int {
+        writer.write("[\n")
+        var count = 0
+        for (it in rows) {
+            if (count > 0) writer.write(",\n")
+            writer.write("  ")
+            writer.write(rowToJson(it).toString())
+            count++
+        }
+        writer.write(if (count > 0) "\n]" else "]")
+        return count
+    }
+
+    /** Streams [rows] to [writer] as CSV, one line at a time. Returns the row count. */
+    fun writeCsvRows(writer: Writer, rows: Sequence<NotiItem>): Int {
+        writer.write("id,source,app,title,text,side,time\n")
+        var count = 0
+        for (it in rows) {
+            writer.write(it.id.toString())
+            writer.write(",")
+            writer.write(csv(it.source)); writer.write(",")
+            writer.write(csv(it.appName)); writer.write(",")
+            writer.write(csv(it.title)); writer.write(",")
+            writer.write(csv(it.text)); writer.write(",")
+            writer.write(csv(it.side)); writer.write(",")
+            writer.write(it.postTime.toString())
+            writer.write("\n")
+            count++
+        }
+        return count
+    }
+
+    /** Write to cache via [write] and fire the system share sheet. */
+    fun share(context: Context, fileName: String, mime: String, write: (Writer) -> Unit) {
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
         val file = File(dir, fileName)
-        file.writeText(content)
+        file.bufferedWriter(Charsets.UTF_8).use(write)
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
         val send = Intent(Intent.ACTION_SEND).apply {
             type = mime
@@ -79,8 +106,8 @@ object Exporter {
         )
     }
 
-    /** Save a copy into the public Downloads folder. Returns true on success. */
-    fun saveToDownloads(context: Context, fileName: String, mime: String, content: String): Boolean =
+    /** Save a copy into the public Downloads folder via [write]. Returns true on success. */
+    fun saveToDownloads(context: Context, fileName: String, mime: String, write: (Writer) -> Unit): Boolean =
         runCatching {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)
@@ -90,7 +117,7 @@ object Exporter {
             val resolver = context.contentResolver
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: return false
-            resolver.openOutputStream(uri)?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+            resolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use(write)
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             resolver.update(uri, values, null, null)

@@ -44,6 +44,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -105,6 +106,9 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
     val scope = rememberCoroutineScope()
     // Row count to show in the wipe confirmation; null = dialog closed.
     var confirmClearCount by remember { mutableStateOf<Long?>(null) }
+    // Set once if NotiStore.get() had to recover from an unreadable database
+    // (see NotiStore.lastRecoveryNotice); null = nothing to show / dismissed.
+    var recoveryNotice by remember { mutableStateOf<String?>(null) }
     val appNames = remember(items) { items.map { it.appName }.distinct().sorted() }
     val filteredItems = remember(items, selectedApp) {
         selectedApp?.let { app -> items.filter { it.appName == app } } ?: items
@@ -114,6 +118,13 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
         items = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(query) }
         notiOn = isNotiAccessEnabled(ctx)
         readerOn = isReaderEnabled(ctx)
+        // NotiStore.get() above is what opens (and, on failure, recovers) the
+        // database — check right after, once, and clear it so it doesn't
+        // reappear on the next refresh/resume.
+        NotiStore.lastRecoveryNotice?.let {
+            recoveryNotice = it
+            NotiStore.clearRecoveryNotice()
+        }
     }
 
     LaunchedEffect(refreshKey) {
@@ -201,6 +212,26 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                 .padding(padding)
                 .fillMaxSize()
         ) {
+            recoveryNotice?.let { notice ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "แจ้งเตือนการกู้คืนฐานข้อมูล",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(notice, color = MaterialTheme.colorScheme.onErrorContainer)
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(onClick = { recoveryNotice = null }) { Text("รับทราบ") }
+                    }
+                }
+            }
             updateAvail?.let { info ->
                 Card(
                     modifier = Modifier
