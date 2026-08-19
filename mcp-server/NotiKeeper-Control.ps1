@@ -188,6 +188,17 @@ function Update-Status {
     }
 }
 
+function Get-ApiToken {
+    $tokenFile = Join-Path $ScriptDir '.notikeeper-token'
+    if (-not (Test-Path $tokenFile)) {
+        $b = New-Object byte[] 32
+        [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+        $t = [Convert]::ToBase64String($b).TrimEnd('=').Replace('+','-').Replace('/','_')
+        Set-Content -Path $tokenFile -Value $t -NoNewline -Encoding ascii
+    }
+    return (Get-Content -Path $tokenFile -Raw).Trim()
+}
+
 function Start-Server {
     if (-not (Test-Path $NodeExe)) {
         $nl = [Environment]::NewLine
@@ -202,6 +213,9 @@ function Start-Server {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    # Same token the .cmd launchers use (mcp-server/load-token.cmd) — without it the
+    # ingest and read APIs are unauthenticated. Generated once, kept out of git.
+    $psi.EnvironmentVariables['NOTIKEEPER_TOKEN'] = Get-ApiToken
     [System.Diagnostics.Process]::Start($psi) | Out-Null
 }
 

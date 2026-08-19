@@ -21,11 +21,10 @@ import http from "node:http";
 import https from "node:https";
 import crypto from "node:crypto";
 import { decodeXmlEntities, sleep } from "./adb-lib.mjs";
-import { DEFAULT_INGEST_URL } from "./config.mjs";
+import { DEFAULT_INGEST_URL, INGEST_TOKEN } from "./config.mjs";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const INGEST_URL   = process.env.INGEST_URL || DEFAULT_INGEST_URL;
-const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 const PKG          = "com.facebook.orca";
 const APP_NAME     = "Messenger";
 const SCREEN_W     = 720;   // Samsung A07 (SM-A075F)

@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
@@ -101,6 +102,9 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
     var readerOn by remember { mutableStateOf(isReaderEnabled(ctx)) }
     var refreshKey by remember { mutableStateOf(0) }
     var updateAvail by remember { mutableStateOf<UpdateInfo?>(null) }
+    val scope = rememberCoroutineScope()
+    // Row count to show in the wipe confirmation; null = dialog closed.
+    var confirmClearCount by remember { mutableStateOf<Long?>(null) }
     val appNames = remember(items) { items.map { it.appName }.distinct().sorted() }
     val filteredItems = remember(items, selectedApp) {
         selectedApp?.let { app -> items.filter { it.appName == app } } ?: items
@@ -160,13 +164,38 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                 actions = {
                     TextButton(onClick = { refreshKey++ }) { Text("รีเฟรช") }
                     TextButton(onClick = {
-                        NotiStore.get(ctx).clear()
-                        refreshKey++
+                        scope.launch {
+                            confirmClearCount = withContext(Dispatchers.IO) { NotiStore.get(ctx).count() }
+                        }
                     }) { Text("ล้าง") }
                 }
             )
         }
     ) { padding ->
+        confirmClearCount?.let { total ->
+            AlertDialog(
+                onDismissRequest = { confirmClearCount = null },
+                title = { Text("ล้างข้อมูลทั้งหมด?") },
+                text = {
+                    Text(
+                        "จะลบข้อความและการแจ้งเตือนทั้งหมด $total รายการ ออกจากเครื่องนี้อย่างถาวร " +
+                            "กู้คืนไม่ได้ — ถ้ายังไม่ได้ซิงค์ขึ้น PC ข้อมูลจะหายไปเลย"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        confirmClearCount = null
+                        scope.launch {
+                            withContext(Dispatchers.IO) { NotiStore.get(ctx).clear() }
+                            refreshKey++
+                        }
+                    }) { Text("ล้างทั้งหมด") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmClearCount = null }) { Text("ยกเลิก") }
+                }
+            )
+        }
         Column(
             modifier = Modifier
                 .padding(padding)

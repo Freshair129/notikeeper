@@ -342,6 +342,12 @@ class NotiStore private constructor(
         return list
     }
 
+    /** Total rows stored. Used to show the real count in the "clear everything" confirmation. */
+    fun count(): Long =
+        database.rawQuery("SELECT COUNT(*) FROM notifications", null).use {
+            if (it.moveToNext()) it.getLong(0) else 0L
+        }
+
     fun clear() {
         database.delete("notifications", null, null)
     }

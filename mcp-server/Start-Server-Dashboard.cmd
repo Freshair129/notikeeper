@@ -13,12 +13,14 @@ if %ERRORLEVEL% EQU 0 (
     echo   Server already running.
 ) else (
     echo   Starting server...
+    call "%~dp0load-token.cmd"
     start "" /B "%NODE_EXE%" "%~dp0server.mjs"
     timeout /t 3 /nobreak >nul
 )
 
 if defined NOTIKEEPER_TOKEN (
-    echo   NOTIKEEPER_TOKEN is set - enter the same token on your phone and the web dashboard.
+    echo   API token is set - the local dashboard authenticates itself automatically.
+    echo   Scan the QR again on the phone so it picks up the token.
 )
 
 echo Opening dashboard in browser...

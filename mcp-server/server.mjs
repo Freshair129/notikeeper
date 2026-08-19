@@ -27,14 +27,45 @@ import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
 import { runGate } from "./llm-gate.mjs";
-import { BIND_HOST, LOCALHOST, LOOPBACK_HOST, PORT } from "./config.mjs";
+import crypto from "node:crypto";
+import { BIND_HOST, IS_LOOPBACK_ONLY, LOCALHOST, LOOPBACK_HOST, PORT, TOKEN_FILE, readLocalToken } from "./config.mjs";
 import { classifyNoise } from "./noise.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
 const DASHBOARD_FILE = path.join(__dirname, "dashboard.html");
 const CHATLOG_DIR = path.join(__dirname, "chatlog");
-const TOKEN = process.env.NOTIKEEPER_TOKEN || "";
+/**
+ * Auth token for /ingest and the read APIs.
+ *
+ * Resolution mirrors the scrapers: environment, then the shared token file, then
+ * generate and persist one. The result is never empty, which is the point — the
+ * gates below used to be written `if (TOKEN && ...)`, so an unset token disabled
+ * authentication rather than denying access. Any server started outside the
+ * launchers therefore served the whole archive to anything that could reach the
+ * port. Failing closed means the worst case is "pair the phone again", not
+ * "the archive was readable by the network".
+ */
+function resolveOrCreateToken() {
+  const fromEnv = (process.env.NOTIKEEPER_TOKEN || "").trim();
+  if (fromEnv) return fromEnv;
+
+  const fromFile = readLocalToken();
+  if (fromFile) return fromFile;
+
+  const generated = crypto.randomBytes(32).toString("base64url");
+  try {
+    fs.writeFileSync(TOKEN_FILE, generated, { encoding: "utf8", mode: 0o600 });
+    console.error(`[notikeeper-mcp] generated a new API token: ${TOKEN_FILE}`);
+    console.error("[notikeeper-mcp] re-pair the phone so it picks up the new token.");
+  } catch (e) {
+    console.error(`[notikeeper-mcp] WARNING: could not persist a token (${e.message}).`);
+    console.error("[notikeeper-mcp] WARNING: using an in-memory token - it changes on every restart.");
+  }
+  return generated;
+}
+
+const TOKEN = resolveOrCreateToken();
 const CONFIG_FILE = path.join(__dirname, "config.json");
 
 // Shared mobile config: the capture-app whitelist pushed to the phone via QR
@@ -242,18 +273,38 @@ const fmt = (r) =>
   `${r.side ? " (" + r.side + ")" : ""}: ${r.text}`;
 
 // ---------- HTTP server ----------
+/**
+ * Origins allowed to read this server's responses from browser JS. Same-origin
+ * requests (the dashboard fetching its own host:port) don't need this at all —
+ * browsers only consult it for *cross*-origin reads. A wildcard here meant any
+ * other page open in the same browser could fetch the archive's JSON and read
+ * it, gated only by knowing the token; reflecting a fixed allowlist instead
+ * means an unrelated origin's request is still answered (CORS is a browser-side
+ * read restriction, not a server-side access control — the auth gate already
+ * does that job) but the browser refuses to hand the response to that page's
+ * script. Recomputed per-request since getLanIp() can change if the network does.
+ */
+function allowedOrigins() {
+  const origins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`, `http://[::1]:${PORT}`];
+  if (!IS_LOOPBACK_ONLY) origins.push(`http://${getLanIp()}:${PORT}`);
+  return origins;
+}
+
 const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // CORS for any cross-origin browser (e.g. opening dashboard from file://)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins().includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   // 1) Upload endpoint (the phone POSTs here)
   if (req.method === "POST" && url.pathname === "/ingest") {
-    if (TOKEN && req.headers["authorization"] !== `Bearer ${TOKEN}`) {
+    if (req.headers["authorization"] !== `Bearer ${TOKEN}`) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
@@ -313,10 +364,11 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // Auth gate for every read API + the SSE stream — no-op unless NOTIKEEPER_TOKEN
-  // is set (matches /ingest's existing opt-in behavior). EventSource can't send
-  // custom headers, so a ?token= query param is accepted as well as the header.
-  if (TOKEN && (url.pathname.startsWith("/api/") || url.pathname === "/events")) {
+  // Auth gate for every read API + the SSE stream. Always on: TOKEN is resolved or
+  // generated at startup and is never empty, so there is no configuration in which
+  // these endpoints serve the archive unauthenticated. EventSource and <img> can't
+  // send custom headers, so a ?token= query param is accepted as well as the header.
+  if (url.pathname.startsWith("/api/") || url.pathname === "/events") {
     const authHeader = req.headers["authorization"];
     const queryToken = url.searchParams.get("token");
     if (authHeader !== `Bearer ${TOKEN}` && queryToken !== TOKEN) {
@@ -700,7 +752,11 @@ const httpServer = http.createServer((req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/api/graph/hql") {
     let body = "";
-    req.on("data", (c) => { body += c; });
+    // HQL queries are short command strings (see the MCP tool's own examples) —
+    // this was the one POST body in the file with no cap at all, unlike /ingest
+    // (50 MB, real batches) and /api/config (100 KB). 20 KB is generous headroom
+    // over any real query while still bounding it.
+    req.on("data", (c) => { body += c; if (body.length > 20_000) req.destroy(); });
     req.on("end", () => {
       const q = (() => { try { return JSON.parse(body).query; } catch { return body; } })();
       graphHql(q).then(
@@ -724,6 +780,10 @@ const httpServer = http.createServer((req, res) => {
       port: PORT,
       token: TOKEN || "",
       updateUrl,
+      // The endpoint above names a LAN address, which is only reachable when the
+      // server was started with NOTIKEEPER_BIND. Surfaced so a pairing UI can warn
+      // instead of handing the phone an endpoint that will silently never connect.
+      loopbackOnly: IS_LOOPBACK_ONLY,
       ...(CONFIG.captureApps.length ? { captureApps: CONFIG.captureApps } : {}),
     };
     sendJson(res, 200, payload, "application/json; charset=utf-8");
@@ -800,9 +860,20 @@ const httpServer = http.createServer((req, res) => {
   res.writeHead(404); res.end("not found");
 });
 
-httpServer.listen(PORT, () =>
-  console.error(`[notikeeper-mcp] HTTP on http://${BIND_HOST}:${PORT}  (dashboard /, ingest /ingest, events /events)`)
-);
+httpServer.listen(PORT, BIND_HOST, () => {
+  console.error(`[notikeeper-mcp] HTTP on http://${BIND_HOST}:${PORT}  (dashboard /, ingest /ingest, events /events)`);
+  if (IS_LOOPBACK_ONLY) {
+    console.error(
+      "[notikeeper-mcp] loopback only - the phone CANNOT upload to this server over Wi-Fi. " +
+      "Set NOTIKEEPER_BIND=0.0.0.0 (ideally with NOTIKEEPER_TOKEN) to allow it."
+    );
+  } else {
+    console.error(
+      `[notikeeper-mcp] reachable on ${BIND_HOST} - every request needs the token in ${path.basename(TOKEN_FILE)}. ` +
+      "Pair the phone from the dashboard to hand it over."
+    );
+  }
+});
 
 // ---------- MCP tools (same data, also exposed to Claude) ----------
 const mcp = new McpServer({ name: "notikeeper", version: "1.1.0" });

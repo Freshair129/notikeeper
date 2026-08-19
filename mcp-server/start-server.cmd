@@ -6,4 +6,5 @@ set "NODE_EXE=C:\Users\freshair\AppData\Local\GoVibeToolchains\node-v24.16.0-win
 if not exist "%NODE_EXE%" set "NODE_EXE=node"
 
 cd /d "%~dp0"
+call "%~dp0load-token.cmd"
 start "" /B "%NODE_EXE%" "%~dp0server.mjs"
