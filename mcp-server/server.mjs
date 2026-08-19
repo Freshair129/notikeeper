@@ -31,6 +31,12 @@ import crypto from "node:crypto";
 import { BIND_HOST, IS_LOOPBACK_ONLY, LOCALHOST, LOOPBACK_HOST, PORT, TOKEN_FILE, readLocalToken } from "./config.mjs";
 import { classifyNoise } from "./noise.mjs";
 
+// Defined here, ahead of everything else that touches `rows`, because
+// dedupCleanup() (below) now needs it at module load time — startup runs a
+// dedup pass before the server is otherwise ready, so this can't wait until
+// wherever it's next convenient to declare a `const`.
+const isNoise = (r) => classifyNoise(r) !== null;
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
 const DASHBOARD_FILE = path.join(__dirname, "dashboard.html");
@@ -227,10 +233,14 @@ rebuildRelations();
 // Some notifications (spam/promo channels especially) repost the exact same
 // text over and over with a new timestamp each time, so the id+time dedup key
 // in ingest() never catches them. This removes exact (pkg, title, side, text)
-// duplicates down to one copy — never a fuzzy/heuristic match, so it can't
-// mistake two different real messages for the same spam blast. Nothing is
-// ever hard-deleted: every removed row is archived to DEDUP_LOG_FILE first,
-// so this is always reversible.
+// duplicates down to one copy, but ONLY among rows the noise classifier
+// (noise.mjs) already flags as not a meaningful message — never a fuzzy match,
+// and never applied to anything that looks like a real conversation, so it
+// can't mistake two genuinely separate messages for the same spam blast
+// (see dedupCleanup's own comment for why that distinction matters — it used
+// to run over every row with no such restriction). Nothing is ever
+// hard-deleted: every removed row is archived to DEDUP_LOG_FILE first, so
+// this is always reversible.
 const DEDUP_LOG_FILE = path.join(__dirname, "dedup-removed.jsonl");
 const DEDUP_SRC_PRIORITY = { scrape: 1, noti: 2, screen: 3 };
 const dedupSrcPri = (s) => DEDUP_SRC_PRIORITY[s] ?? 4;
@@ -291,6 +301,18 @@ function atomicWriteFileSync(filePath, content, { retries = 5, retryDelayMs = 15
 function dedupCleanup() {
   const groups = new Map();
   for (const r of rows) {
+    // Only rows the noise classifier already treats as not a meaningful
+    // message — promo blasts, system spam, sticker/URL reposts, generic-title
+    // chrome — are even eligible to be grouped here. This used to run over
+    // EVERY row unconditionally with no time bound at all, which meant two
+    // entirely separate, genuine occurrences of a short reply like "ครับ"
+    // anywhere across the archive's whole history collapsed down to one, with
+    // no trace beyond an entry in dedup-removed.jsonl. A real message from a
+    // real person, however many times they've sent it, is never eligible for
+    // this pass now, regardless of how much text or time separates the two
+    // occurrences — this is the one dimension where being wrong is
+    // irreversible (see the capture-to-archive integrity audit, G-06).
+    if (!isNoise(r)) continue;
     const key = `${r.pkg || ""}|${r.title || ""}|${r.side || ""}|${r.text || ""}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
@@ -400,8 +422,6 @@ function sendJson(res, code, obj, contentType = "application/json") {
   res.writeHead(code, { "Content-Type": contentType });
   res.end(JSON.stringify(obj));
 }
-
-const isNoise = (r) => classifyNoise(r) !== null;
 
 // ---------- helpers used by every layer ----------
 const byNewest = (a, b) => b.time - a.time;

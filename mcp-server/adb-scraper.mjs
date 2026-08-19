@@ -383,7 +383,7 @@ function extractMessages(xml, currentTimeMs) {
 
 // ── Scrape one thread (phone already has it open) ─────────────────────────────
 async function scrapeCurrentThread() {
-  const seen   = new Set();   // key = text|side|dayBucket
+  const seen   = new Set();   // key = text|side|5-minute time bucket
   const result = [];          // { text, side, time }
   let idleScrolls = 0;
   let scrollCount = 0;
@@ -399,8 +399,16 @@ async function scrapeCurrentThread() {
 
     let newThisRound = 0;
     for (const msg of messages) {
-      const day = Math.floor(msg.time / 86400000);
-      const key = `${msg.text}|${msg.side}|${day}`;
+      // Exists to stop the SAME on-screen bubble being re-collected as the
+      // scraper scrolls back over it — a full calendar day was far coarser
+      // than that actual case needs, and it silently swallowed a real, later
+      // occurrence of the identical short text on the same day. 5 minutes
+      // (the same "same real-world event" granularity buildTurns in
+      // graph-index.mjs already uses) still catches a re-render seconds apart
+      // during one scroll pass without erasing a genuine repeat sent hours
+      // apart — see G-35 in the capture-to-archive integrity audit.
+      const bucket = Math.floor(msg.time / (5 * 60 * 1000));
+      const key = `${msg.text}|${msg.side}|${bucket}`;
       if (seen.has(key)) continue;
       seen.add(key);
       result.push({ ...msg, convo });

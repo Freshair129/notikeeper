@@ -78,13 +78,24 @@ class NotiStore private constructor(
             put("text", text)
             put("side", "")
             put("postTime", postTime)
-            // Dedup on content, NOT time: spam/promo channels repost identical text
-            // with a fresh timestamp each time, so including postTime here made every
-            // repost a "new" row. Keying on (pkg, title, text) collapses those to one
-            // — same exact-match semantics the PC server uses. Trade-off: a genuinely
-            // repeated short message ("ครับ") is also kept once, which the PC store
-            // already does anyway, so phone and PC stay consistent.
-            put("dedupKey", "noti:$pkg:$title:$text")
+            // Dedup on content plus a COARSE time bucket, not exact time and not
+            // content alone. Content-only (no time at all) was tried — it collapses
+            // a spam channel's identical repost, but it ALSO collapses a genuine
+            // repeated reply ("ครับ") sent minutes or days apart into a single row,
+            // permanently, with no record anywhere that it happened twice; unlike
+            // every later stage in the pipeline, this one runs before anything else
+            // ever sees the row, so there is nothing downstream that could recover
+            // it. 5 minutes (the same "same real-world event" granularity
+            // graph-index.mjs's buildTurns already uses on the PC side) still
+            // collapses true instant re-delivery — the same notification reposted
+            // twice in one burst — without erasing a repeat sent apart in time.
+            // Promo-channel spam that reposts on a slower cadence than that is the
+            // PC server's job now: dedupCleanup() there is restricted to rows the
+            // noise classifier already flags as not a meaningful message, so it can
+            // collapse a real spam blast across its whole history without this key
+            // having to do that job by discarding real content on the phone.
+            val bucket = postTime / (5 * 60 * 1000)
+            put("dedupKey", "noti:$pkg:$title:$text:$bucket")
         }
         database.insertWithOnConflict(
             "notifications", null, values, SQLiteDatabase.CONFLICT_IGNORE
