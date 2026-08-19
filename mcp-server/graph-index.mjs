@@ -54,6 +54,32 @@ const threadId = (id)   => `thread:${id}`;
 const userId   = (id)   => `user:${id}`;
 const msgId    = (id)   => `msg:${id}`;
 
+/**
+ * The graph node label for a message row, by its raw `source` value.
+ *
+ * There are four source values across the pipeline (NotiLoggerService and
+ * MessengerReaderService on the phone; scraper.mjs/scrape-all.mjs — now
+ * superseded, see adb-lib.mjs's own "Legacy*" naming for their shared
+ * helpers — and the current adb-scraper.mjs on the PC), and this used to
+ * collapse three of them into one label via `source === "noti" ? A : B` —
+ * anything that wasn't `noti` silently became "ScreenLine", including rows
+ * from a PC-driven scroll-scrape that were never anywhere near the phone's
+ * screen reader. A single lookup here, updated in one place, replaces that
+ * binary check and its implicit "everything else" bucket — the same shape
+ * of bug that quietly excluded adb-scrape from buildTurns() below until this
+ * fix (see G-22 in the capture-to-archive integrity audit).
+ */
+const SOURCE_LABELS = {
+  noti: "Notification",     // NotiLoggerService — a notification preview
+  screen: "ScreenLine",      // MessengerReaderService — read directly off the device screen
+  scrape: "ScrapedMessage",  // scraper.mjs / scrape-all.mjs (legacy) — PC-driven scroll-scrape
+  "adb-scrape": "ScrapedMessage", // adb-scraper.mjs (current) — same kind of observation, newer scraper
+};
+// Falls back to a visibly distinct label, not silently to "Message" — an
+// unrecognized source should be obvious in the graph, not blended into
+// whichever bucket happened to be the ternary's else-branch.
+const sourceLabel = (source) => SOURCE_LABELS[source] ?? "UnknownSource";
+
 // BGE-M3 dimensions — multilingual, strong on Thai. Served by Ollama.
 const EMBED_MODEL = "bge-m3";
 const EMBED_DIM = 1024;
@@ -120,7 +146,7 @@ export async function rebuildFromSqlite(sqlite) {
   for (const m of msgs) {
     nodes.push({
       id: msgId(m.id),
-      labels: ["Message", m.source === "noti" ? "Notification" : "ScreenLine"],
+      labels: ["Message", sourceLabel(m.source)],
       props: { text: m.text, side: m.side, time: m.time,
                thread_id: m.thread_id, sender_id: m.sender_id, source: m.source },
     });
@@ -160,15 +186,21 @@ export async function rebuildFromSqlite(sqlite) {
 /**
  * Coalesce raw message rows into *conversational turns* — the embedding unit.
  *
- * Why: the ADB scraper batch-captures one spoken burst as many tiny bubbles
- * ("เด็ก16" / "หลอกว่า19" / "วันนี้นัด…"), each at the same timestamp. Embedding
- * each bubble gives near-random 1024d vectors that pollute recall; merging them
- * into one turn restores semantic signal. (See the qdrant-search-quality skill:
- * splitting mid-sentence drops quality 30-40%.)
+ * Why: a PC-driven scroll-scrape batch-captures one spoken burst as many tiny
+ * bubbles ("เด็ก16" / "หลอกว่า19" / "วันนี้นัด…"), each at the same timestamp.
+ * Embedding each bubble gives near-random 1024d vectors that pollute recall;
+ * merging them into one turn restores semantic signal. (See the
+ * qdrant-search-quality skill: splitting mid-sentence drops quality 30-40%.)
  *
- * What counts as embeddable: `scrape`-source rows only. The ADB scraper scrolls
- * the *interior* of a conversation, so scrape rows are clean dialogue with a real
- * sender + side. The other two sources are noise for retrieval and are dropped:
+ * What counts as embeddable: `scrape` and `adb-scrape` rows — both PC-driven
+ * scroll-scrapes of the *interior* of a conversation (scraper.mjs/
+ * scrape-all.mjs, now superseded, and the current adb-scraper.mjs
+ * respectively; see sourceLabel's comment above), so both are clean dialogue
+ * with a real sender + side. This used to check `source='scrape'` alone —
+ * silently excluding every row the CURRENT scraper has ever produced from
+ * semantic search, since it tags its rows `adb-scrape` (see G-22 in the
+ * capture-to-archive integrity audit). The other two sources are still noise
+ * for retrieval and are still dropped:
  *   - `screen` = the Messenger inbox/home accessibility dump ("Seen by…", "active
  *     now", "11:09 PM", "Chats, 12 unread, Tab 1 of 4") — UI chrome, not dialogue;
  *   - `noti`   = app notifications (weather, promos, GitHub) — app spam, and any
@@ -180,7 +212,8 @@ export async function rebuildFromSqlite(sqlite) {
  */
 export function buildTurns(sqlite, { windowMs = 5 * 60 * 1000, minTurnChars = 8, minFragChars = 2 } = {}) {
   const rows = sqlite.prepare(
-    "SELECT id, thread_id, sender_id, side, text, time, source FROM messages WHERE source='scrape' ORDER BY thread_id, time, id"
+    "SELECT id, thread_id, sender_id, side, text, time, source FROM messages " +
+    "WHERE source IN ('scrape', 'adb-scrape') ORDER BY thread_id, time, id"
   ).all();
 
   const turns = [];

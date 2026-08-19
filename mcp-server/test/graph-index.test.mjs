@@ -4,22 +4,30 @@ import { buildTurns } from "../graph-index.mjs";
 
 const sqlite = (rows) => ({
   prepare(sql) {
-    assert.match(sql, /WHERE source='scrape'/);
-    return { all: () => rows.filter((row) => row.source === "scrape") };
+    assert.match(sql, /WHERE source IN \('scrape', 'adb-scrape'\)/);
+    return { all: () => rows.filter((row) => row.source === "scrape" || row.source === "adb-scrape") };
   },
 });
 
-test("buildTurns keeps only scrape rows and merges same speaker fragments within five minutes", () => {
+test("buildTurns keeps scrape AND adb-scrape rows, merges same speaker fragments within five minutes", () => {
+  // scraper.mjs/scrape-all.mjs (source: "scrape") and adb-scraper.mjs (source:
+  // "adb-scrape") are two different scraper implementations producing the
+  // same kind of observation — a PC-driven scroll-scrape of one conversation
+  // — so a fragment from either must merge into the same turn as its
+  // neighbors. Before this fix, buildTurns' SQL filtered on source='scrape'
+  // alone, which silently excluded every row the current scraper (adb-scrape)
+  // has ever produced from semantic search — see G-22 in the capture-to-
+  // archive integrity audit. id 3 below is the regression check for that.
   const turns = buildTurns(sqlite([
     { id: 1, thread_id: 10, sender_id: 2, side: "them", text: "hello", time: 1_000, source: "scrape" },
     { id: 2, thread_id: 10, sender_id: 2, side: "them", text: "there", time: 2_000, source: "scrape" },
-    { id: 3, thread_id: 10, sender_id: 2, side: "them", text: "hello", time: 3_000, source: "scrape" },
+    { id: 3, thread_id: 10, sender_id: 2, side: "them", text: "friend", time: 3_000, source: "adb-scrape" },
     { id: 4, thread_id: 10, sender_id: 2, side: "them", text: "ignored", time: 4_000, source: "screen" },
     { id: 5, thread_id: 10, sender_id: 2, side: "them", text: "ignored", time: 5_000, source: "noti" },
   ]));
 
   assert.deepEqual(turns.map(({ repId, ids, text }) => ({ repId, ids, text })), [
-    { repId: 1, ids: [1, 2, 3], text: "hello there" },
+    { repId: 1, ids: [1, 2, 3], text: "hello there friend" },
   ]);
 });
 

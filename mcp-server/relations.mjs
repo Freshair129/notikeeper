@@ -60,7 +60,19 @@ function looksLikeChromeLabel(text) {
   if (!t) return true;
   if (isSharedChromeLabel(t) || CHROME_WORDS.has(t)) return true;
   if (t.length <= 2) return true;                       // single char / emoji button
-  if (/^[\p{L}]{1,16}$/u.test(t)) return true;          // single short word (no whitespace)
+  // "No whitespace -> one word -> probably a button label" only holds for
+  // scripts that use whitespace to separate words in the first place. Thai
+  // (also Lao, Khmer, Myanmar, CJK, ...) has no inter-word spaces even in
+  // completely ordinary sentences, so this rule used to classify a real,
+  // multi-word Thai message up to 16 characters as chrome and drop it from
+  // relations.db (and everything built on it — Threads, Graph, chatlog,
+  // every MCP tool) with no trace. Scoped to Latin script, the one family
+  // where the assumption is actually true — see G-08 in the capture-to-
+  // archive integrity audit. Thai UI chrome specifically is still caught:
+  // CHROME_WORDS and UI_PATTERNS above already carry an extensive
+  // Thai-specific list built up over several prior fixes, none of which
+  // depend on this whitespace heuristic.
+  if (/^\p{Script=Latin}{1,16}$/u.test(t)) return true;
   for (const re of UI_PATTERNS) if (re.test(t)) return true;
   return false;
 }
