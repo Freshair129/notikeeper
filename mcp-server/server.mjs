@@ -70,12 +70,13 @@ const CONFIG_FILE = path.join(__dirname, "config.json");
 
 // Shared mobile config: the capture-app whitelist pushed to the phone via QR
 // pairing, and the last device seen at /ingest (both surfaced on the dashboard).
-let CONFIG = { captureApps: [], lastDevice: null };
+let CONFIG = { captureApps: [], lastDevice: null, ignoredNames: ["LV177"] };
 try {
   if (fs.existsSync(CONFIG_FILE)) {
     const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
     if (Array.isArray(parsed.captureApps)) CONFIG.captureApps = parsed.captureApps;
     if (parsed.lastDevice) CONFIG.lastDevice = parsed.lastDevice;
+    if (Array.isArray(parsed.ignoredNames)) CONFIG.ignoredNames = parsed.ignoredNames;
   }
 } catch (e) { console.error("[notikeeper-mcp] config load failed:", e.message); }
 function saveConfig() {
@@ -85,18 +86,6 @@ function saveConfig() {
 const rows = [];
 const seen = new Set();
 const keyOf = (r) => `${r.id}-${r.time}`;
-// Max valid `id` across a batch of rows — used to build the /ingest ack
-// high-water mark (Phase 1 of docs/ARCHITECTURE_CHANGE_REQUEST.md). Returns
-// null if the batch has no rows with a usable numeric id.
-const maxId = (arr) => {
-  let m = null;
-  for (const r of arr) {
-    if (r == null || r.id == null) continue;
-    const n = Number(r.id);
-    if (!Number.isNaN(n) && (m === null || n > m)) m = n;
-  }
-  return m;
-};
 
 /** Live SSE subscribers (browsers watching the dashboard). */
 const sseClients = new Set();
@@ -120,21 +109,106 @@ function load() {
   }
 }
 
+/**
+ * Append [text] to [filePath] and fsync before returning — appendFileSync
+ * alone only guarantees the OS page cache has it, not the disk. Retries a few
+ * times on the same transient Windows file-lock class (EPERM/EBUSY/EACCES)
+ * atomicWriteFileSync already has to handle (see its comment for how that was
+ * found); a persistent failure still throws, which is the point — ingest()'s
+ * caller must not admit these rows as "durable" if this doesn't return clean.
+ */
+function appendDurable(filePath, text, { retries = 5, retryDelayMs = 150 } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const fd = fs.openSync(filePath, "a");
+      try {
+        fs.writeSync(fd, text);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return;
+    } catch (e) {
+      const retryable = e.code === "EPERM" || e.code === "EBUSY" || e.code === "EACCES";
+      if (!retryable || attempt >= retries) throw e;
+      console.error(`[ingest] append attempt ${attempt} to ${filePath} got ${e.code}, retrying...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelayMs);
+    }
+  }
+}
+
+/**
+ * Ingests a batch, durably, and returns the id through which the caller can
+ * honestly acknowledge receipt (see /ingest's handler — this is Phase 1 of
+ * docs/ARCHITECTURE_CHANGE_REQUEST.md, rebuilt to actually hold the guarantee
+ * its own comment used to just assert).
+ *
+ * Two things this fixes, both about `seen`/`rows` being the phone's proof that
+ * a row is durably stored:
+ *
+ *  1. The old code added every new row to `seen`/`rows` BEFORE the append that
+ *     was supposed to persist them. If that append then threw — disk full, a
+ *     permission error, anything — the exception propagated up and the client
+ *     correctly saw a failure, EXCEPT the rows were already marked "seen" in
+ *     memory. A retry of the identical batch would then find every row
+ *     already in `seen`, write nothing, and the handler would happily ack the
+ *     resubmitted batch's ids as durable — a full 200 for a batch that was
+ *     never actually on disk. Rows here only enter `seen`/`rows` AFTER
+ *     appendDurable() returns without throwing, so a failed attempt leaves
+ *     nothing to falsely "remember" and a retry behaves like a first try.
+ *
+ *  2. The ack itself: `ackThroughId` only ever reflects ids from THIS array —
+ *     freshly persisted just now, or already `seen` from a prior successful
+ *     call for the SAME rows (so a duplicate resubmission still acks
+ *     correctly without writing twice). It intentionally has no fallback to
+ *     the store's overall max id. `rows` mixes ids from independent
+ *     producers with no shared numbering — the phone's own small sequential
+ *     SQLite autoincrement ids alongside the ADB/legacy scrapers' much larger
+ *     Date.now()*1000+i ids — and acking against whichever happens to be
+ *     largest across the whole store let one device's/producer's id
+ *     authorize pruning local rows a completely different device never
+ *     actually uploaded. A batch with nothing to durably vouch for now acks
+ *     0, not "whatever the biggest id in the store happens to be."
+ */
 function ingest(arr) {
-  const fresh = [];
+  const candidates = [];
+  const candidateKeys = [];
+  let ackThroughId = null;
+
   for (const r of arr) {
     if (r == null || r.id == null) continue;
     const k = keyOf(r);
-    if (seen.has(k)) continue;
-    seen.add(k); rows.push(r); fresh.push(r);
+    const n = Number(r.id);
+    const idUsable = !Number.isNaN(n);
+    if (seen.has(k)) {
+      // Already durable from a prior call — fine to vouch for again.
+      if (idUsable && (ackThroughId === null || n > ackThroughId)) ackThroughId = n;
+      continue;
+    }
+    candidates.push(r);
+    candidateKeys.push(k);
   }
-  if (fresh.length) {
-    fs.appendFileSync(DATA_FILE, fresh.map((r) => JSON.stringify(r)).join("\n") + "\n");
+
+  if (candidates.length) {
+    const text = candidates.map((r) => JSON.stringify(r)).join("\n") + "\n";
+    // Throws straight out of ingest() on failure — nothing below runs, and
+    // critically nothing above has touched `seen`/`rows` for these rows yet.
+    appendDurable(DATA_FILE, text);
+
+    for (let i = 0; i < candidates.length; i++) {
+      seen.add(candidateKeys[i]);
+      rows.push(candidates[i]);
+    }
+    for (const r of candidates) {
+      const n = Number(r.id);
+      if (!Number.isNaN(n) && (ackThroughId === null || n > ackThroughId)) ackThroughId = n;
+    }
     // incrementally fold the new rows into the relational DB
-    try { reindex(RDB, fresh); } catch (e) { console.error("[relations] fold failed:", e.message); }
-    broadcast("new", { count: fresh.length, total: rows.length, sample: fresh.slice(-3) });
+    try { reindex(RDB, candidates); } catch (e) { console.error("[relations] fold failed:", e.message); }
+    broadcast("new", { count: candidates.length, total: rows.length, sample: candidates.slice(-3) });
   }
-  return fresh.length;
+
+  return { fresh: candidates, ackThroughId: ackThroughId ?? 0 };
 }
 
 load();
@@ -160,6 +234,59 @@ rebuildRelations();
 const DEDUP_LOG_FILE = path.join(__dirname, "dedup-removed.jsonl");
 const DEDUP_SRC_PRIORITY = { scrape: 1, noti: 2, screen: 3 };
 const dedupSrcPri = (s) => DEDUP_SRC_PRIORITY[s] ?? 4;
+
+/**
+ * Replace `filePath`'s content without ever leaving it truncated or partial.
+ *
+ * A plain fs.writeFileSync opens the target with O_TRUNC and writes into it in
+ * place — a crash, a full disk, or a killed process partway through leaves
+ * whatever fraction had been flushed, and the rest (often most of the file, for
+ * something this size) is gone. DATA_FILE is the one archive this whole system
+ * is built around; dedupCleanup rewrites the entire thing every hour, and it is
+ * also the phone's documented recovery path (see NotiStore.kt's DB-open catch).
+ * Losing it to an interrupted write would take out the whole loop.
+ *
+ * Write to a sibling temp file, fsync it so the bytes are actually on stable
+ * storage rather than sitting in a buffer, then rename over the real path.
+ * rename() replaces the destination as a single filesystem operation — the
+ * reader-visible file is either fully the old content or fully the new content,
+ * never a mix — on both POSIX and Windows (verified here; Windows historically
+ * required MOVEFILE_REPLACE_EXISTING for this, which is what libuv/Node use).
+ *
+ * Trade-off found while verifying this: on Windows, unlike a plain in-place
+ * write, rename() over a destination that some *other* process has open (an
+ * editor with data.jsonl open to look at it, an AV scan, a backup tool taking
+ * a snapshot) fails with EPERM rather than just succeeding around it — a real,
+ * easily-reproduced case, not a hypothetical. Retrying a few times rides out
+ * the transient ones; the caller still needs to handle a persistent failure
+ * without crashing (see dedupCleanup, which now writes before mutating any
+ * in-memory state so a failure here leaves disk and memory equally untouched).
+ */
+function atomicWriteFileSync(filePath, content, { retries = 5, retryDelayMs = 150 } = {}) {
+  const tmpPath = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+  const fd = fs.openSync(tmpPath, "w");
+  try {
+    fs.writeSync(fd, content);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.renameSync(tmpPath, filePath);
+      return;
+    } catch (e) {
+      const retryable = e.code === "EPERM" || e.code === "EBUSY" || e.code === "EACCES";
+      if (!retryable || attempt >= retries) {
+        try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+        throw e;
+      }
+      console.error(`[atomic-write] ${filePath}: rename attempt ${attempt} got ${e.code}, retrying...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelayMs);
+    }
+  }
+}
 
 function dedupCleanup() {
   const groups = new Map();
@@ -191,11 +318,24 @@ function dedupCleanup() {
     .join("\n") + "\n";
   fs.appendFileSync(DEDUP_LOG_FILE, archiveLines);
 
+  // Write the new archive BEFORE touching any in-memory state. If this throws
+  // (a persistent Windows file lock outlasting atomicWriteFileSync's retries,
+  // a full disk, ...), the in-memory `rows`/`seen` must stay exactly as they
+  // were — untouched, still matching what's on disk — rather than racing ahead
+  // to a deduped state the file itself was never updated to reflect. Not
+  // caught here: propagates out of dedupCleanup so every caller (startup,
+  // the hourly timer, POST /api/dedup/rebuild) sees this pass failed.
+  try {
+    atomicWriteFileSync(DATA_FILE, keptRows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  } catch (e) {
+    console.error(`[dedup] FAILED to write ${path.basename(DATA_FILE)} - keeping the old file, skipping this pass: ${e.message}`);
+    return { removed: 0, groups: 0, error: e.message };
+  }
+
   rows.length = 0;
-  rows.push(...keptRows);
+  for (const r of keptRows) rows.push(r);
   seen.clear();
   for (const r of rows) seen.add(keyOf(r));
-  fs.writeFileSync(DATA_FILE, keptRows.map((r) => JSON.stringify(r)).join("\n") + "\n");
 
   // Purge the same rows from relations.db (Threads/Graph tabs, MCP tools) so
   // they don't keep showing duplicates reindex() would otherwise never remove.
@@ -216,8 +356,24 @@ function dedupCleanup() {
   return { removed: removedRows.length, groups: groupsAffected };
 }
 
-dedupCleanup(); // once at startup
-setInterval(dedupCleanup, 60 * 60 * 1000); // then hourly
+// dedupCleanup already turns a failed archive write into a logged no-op (see
+// above), but nothing guards the rest of the function — a bad grouping key, a
+// full disk on the DEDUP_LOG_FILE append, anything unanticipated. An uncaught
+// throw here is an uncaught throw at the top of the module / inside a timer
+// callback, and Node has no default recovery from either: it takes the whole
+// server down, ending notification capture along with whatever this pass
+// tripped over. A skipped dedup pass is fine — there's another one next hour.
+function runDedupCleanupSafely(reason) {
+  try {
+    return dedupCleanup();
+  } catch (e) {
+    console.error(`[dedup] pass (${reason}) failed unexpectedly, server stays up: ${e.stack || e.message}`);
+    return { removed: 0, groups: 0, error: e.message };
+  }
+}
+
+runDedupCleanupSafely("startup");
+setInterval(() => runDedupCleanupSafely("hourly"), 60 * 60 * 1000);
 
 /** Return the first private-LAN IPv4 address (e.g. 192.168.x.x or 10.x), skipping
  *  loopback, link-local, and the noisy 172.x ranges used by WSL/Hyper-V. */
@@ -315,34 +471,45 @@ const httpServer = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => { body += c; if (body.length > 50_000_000) req.destroy(); });
     req.on("end", () => {
+      let batch;
       try {
         const parsed = JSON.parse(body);
-        const batch = Array.isArray(parsed) ? parsed : [parsed];
-        const n = ingest(batch);
-        if (deviceName) {
-          CONFIG.lastDevice = { name: deviceName, lastSeen: Date.now() };
-          saveConfig();
-        }
-        // Ack high-water mark (docs/ARCHITECTURE_CHANGE_REQUEST.md Phase 1): the
-        // batch is fsync'd to data.jsonl inside ingest() above, before this
-        // response goes out, so acking the batch's max id is durable — safe for
-        // the phone to treat as a prune floor. Falls back to the server's overall
-        // max id when the batch had none (e.g. all rows were malformed, or the
-        // batch was empty). `rows` is a single shared store with no per-device
-        // partition, so this fallback is only correct under the single-device
-        // deployment model this app is built for (see CLAUDE.md: "Personal-use
-        // tool for the device owner's own data"). If this ever becomes a
-        // multi-device tool, `rows`/ackedThroughId must be scoped per device
-        // before Phase 2 prune (NotiStore.pruneAcked) can keep trusting it —
-        // otherwise one device's ack could wrongly authorize pruning another
-        // device's un-acked local rows, since local row ids are independent
-        // per-install SQLite autoincrement counters, not a global sequence.
-        const ackedThroughId = maxId(batch) ?? maxId(rows) ?? 0;
-        sendJson(res, 200, { ok: true, received: n, total: rows.length, ackedThroughId });
-        console.error(`[notikeeper-mcp] ingested ${n} new (total ${rows.length})`);
+        batch = Array.isArray(parsed) ? parsed : [parsed];
       } catch (e) {
-        sendJson(res, 400, { error: String(e) });
+        sendJson(res, 400, { error: String(e) }); // malformed request — the client's problem
+        return;
       }
+
+      let result;
+      try {
+        result = ingest(batch);
+      } catch (e) {
+        // The durable write itself failed (disk full, a permission error, a
+        // lock that outlasted appendDurable's retries, ...) — not the
+        // client's fault, so 500, not 400. ingest() guarantees nothing in
+        // `batch` was admitted into `seen`/`rows` when it throws, so no ack
+        // goes out and the phone must not advance anything; retrying this
+        // exact batch later will attempt the write again rather than finding
+        // everything already "seen" and silently doing nothing (see
+        // ingest()'s doc comment — this is the failure mode that used to
+        // produce a false 200 ack for data that was never on disk).
+        console.error("[notikeeper-mcp] ingest FAILED, nothing durable for this batch:", e.message);
+        sendJson(res, 500, { error: String(e) });
+        return;
+      }
+
+      if (deviceName) {
+        CONFIG.lastDevice = { name: deviceName, lastSeen: Date.now() };
+        saveConfig();
+      }
+      // ackedThroughId comes straight from ingest() — every id in it is either
+      // freshly fsynced to disk just now, or was already durable from a prior
+      // successful call. See ingest()'s doc comment for why there is
+      // deliberately no fallback to the store's overall max id here anymore.
+      sendJson(res, 200, {
+        ok: true, received: result.fresh.length, total: rows.length, ackedThroughId: result.ackThroughId,
+      });
+      console.error(`[notikeeper-mcp] ingested ${result.fresh.length} new (total ${rows.length})`);
     });
     return;
   }
@@ -517,8 +684,8 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/api/dedup/rebuild") {
-    const r = dedupCleanup();
-    sendJson(res, 200, { ok: true, ...r }, "application/json; charset=utf-8");
+    const r = runDedupCleanupSafely("manual");
+    sendJson(res, r.error ? 500 : 200, { ok: !r.error, ...r }, "application/json; charset=utf-8");
     return;
   }
 
@@ -804,8 +971,11 @@ const httpServer = http.createServer((req, res) => {
         const parsed = JSON.parse(body);
         if (Array.isArray(parsed.captureApps)) {
           CONFIG.captureApps = parsed.captureApps.filter((s) => typeof s === "string");
-          saveConfig();
         }
+        if (Array.isArray(parsed.ignoredNames)) {
+          CONFIG.ignoredNames = parsed.ignoredNames.filter((s) => typeof s === "string");
+        }
+        saveConfig();
         sendJson(res, 200, { ok: true, config: CONFIG });
       } catch (e) {
         sendJson(res, 400, { error: String(e) });
