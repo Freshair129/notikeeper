@@ -101,6 +101,7 @@ export function openDb(filePath) {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  migrateUserAppScope(db);
   // Detect whether the FTS index already exists *before* initSchema creates it,
   // so we only (re)build it when it was just created — either a fresh DB or an
   // older relations.db migrating up. (We can't compare row counts: count(*) on
@@ -131,6 +132,53 @@ function migrateTimeExactColumn(db) {
   }
 }
 
+/**
+ * Pre-G-12, `users.name` was globally UNIQUE — two different real people
+ * happening to share a first name in two different apps (or even the same
+ * app) silently merged into one user row, one shared message_count, one
+ * shared identity. See G-12 in the capture-to-archive integrity audit.
+ * Fixing this changes the UNIQUE constraint itself (name -> app_id+name),
+ * which SQLite can't do with an additive ALTER TABLE, and there's no way to
+ * correctly un-merge already-collapsed cross-app identities from the merged
+ * aggregate alone (message_count/first_seen/last_seen no longer say which
+ * app contributed what). relations.db is a derived cache of data.jsonl,
+ * though, not the source of truth — server.mjs's rebuildRelations() already
+ * does a full reindex() of every row from data.jsonl unconditionally on
+ * every startup — so instead of trying to split merged rows in place, this
+ * detects the old schema and wipes every derived table, letting that
+ * already-existing full reindex regenerate them correctly-scoped from the
+ * raw archive, which still has every row's real `pkg`. Nothing here touches
+ * data.jsonl itself.
+ */
+function migrateUserAppScope(db) {
+  const usersExists = !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!usersExists) return; // fresh database — initSchema below creates the current schema directly
+  const hasAppId = db.prepare("PRAGMA table_info(users)").all()
+    .some((c) => c.name === "app_id");
+  if (hasAppId) return; // already migrated
+
+  console.error(
+    "[relations] users table predates per-app identity scoping (G-12) — " +
+    "rebuilding derived tables from data.jsonl"
+  );
+  // Drop children before the tables they reference (foreign_keys is ON).
+  // The FTS triggers target `messages` specifically; dropped explicitly
+  // rather than assumed to go with it, since initSchema's CREATE TRIGGER IF
+  // NOT EXISTS would otherwise silently keep a stale trigger around.
+  db.exec(`
+    DROP TRIGGER IF EXISTS messages_fts_ai;
+    DROP TRIGGER IF EXISTS messages_fts_ad;
+    DROP TRIGGER IF EXISTS messages_fts_au;
+    DROP TABLE IF EXISTS messages_fts;
+    DROP TABLE IF EXISTS messages;
+    DROP TABLE IF EXISTS participants;
+    DROP TABLE IF EXISTS users;
+    DROP TABLE IF EXISTS threads;
+  `);
+}
+
 function initSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS apps (
@@ -141,10 +189,13 @@ function initSchema(db) {
 
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
+      app_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
       first_seen INTEGER,
       last_seen  INTEGER,
-      message_count INTEGER DEFAULT 0
+      message_count INTEGER DEFAULT 0,
+      UNIQUE (app_id, name),
+      FOREIGN KEY (app_id) REFERENCES apps(id)
     );
 
     CREATE TABLE IF NOT EXISTS threads (
@@ -266,9 +317,9 @@ function stmts(db) {
     upsertApp:  db.prepare(`INSERT INTO apps(name, pkg) VALUES(?, ?)
                            ON CONFLICT(name) DO UPDATE SET pkg=COALESCE(pkg, excluded.pkg)
                            RETURNING id`),
-    upsertUser: db.prepare(`INSERT INTO users(name, first_seen, last_seen, message_count)
-                           VALUES(?, ?, ?, 0)
-                           ON CONFLICT(name) DO UPDATE SET
+    upsertUser: db.prepare(`INSERT INTO users(app_id, name, first_seen, last_seen, message_count)
+                           VALUES(?, ?, ?, ?, 0)
+                           ON CONFLICT(app_id, name) DO UPDATE SET
                              first_seen = MIN(first_seen, excluded.first_seen),
                              last_seen  = MAX(last_seen,  excluded.last_seen)
                            RETURNING id`),
@@ -409,7 +460,9 @@ export function reindex(db, rows) {
       const thread = s.upsertThread.get(appRow.id, threadName, time, time);
       let senderId = null;
       if (senderName) {
-        const u = s.upsertUser.get(senderName, time, time);
+        // Scoped to the app the message came from — see G-12: the same
+        // name in two different apps is not assumed to be the same person.
+        const u = s.upsertUser.get(appRow.id, senderName, time, time);
         senderId = u.id;
         s.addParticipant.run(thread.id, senderId);
       }
@@ -543,9 +596,13 @@ export function getThread(db, id, { limit = 500 } = {}) {
 }
 
 export function listUsers(db, { limit = 200 } = {}) {
+  // app included so two identically-named users in different apps (now
+  // correctly separate rows post-G-12) are actually distinguishable in the
+  // list, not just internally distinct by an id nothing here showed before.
   return db.prepare(`
-    SELECT id, name, message_count, first_seen, last_seen
-    FROM users ORDER BY message_count DESC LIMIT ?`).all(limit);
+    SELECT u.id, u.name, a.name AS app, u.message_count, u.first_seen, u.last_seen
+    FROM users u JOIN apps a ON a.id = u.app_id
+    ORDER BY u.message_count DESC LIMIT ?`).all(limit);
 }
 
 export function statsSummary(db) {
