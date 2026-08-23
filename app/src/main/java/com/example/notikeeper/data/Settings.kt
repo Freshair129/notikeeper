@@ -56,8 +56,19 @@ object Settings {
     fun getReadAloudScreen(c: Context): Boolean = SecureStore.getBoolean(c, "read_screen", false)
     fun setReadAloudScreen(c: Context, v: Boolean) = SecureStore.putBoolean(c, "read_screen", v)
 
-    /** Packages allowed to be read aloud. Empty set = read every app. */
-    fun getSpeakApps(c: Context): Set<String> = SecureStore.getStringSet(c, "speak_apps", emptySet())
+    /**
+     * Packages allowed to be read aloud. Unset (fresh install, never touched)
+     * defaults to mirroring [getCaptureApps] rather than "every app" — read-aloud
+     * is the highest-consequence default in the app (unlike capture, which just
+     * stores something; this speaks it out loud on whatever audio route is
+     * active), so turning it on for the first time should only speak the same
+     * chat apps already being captured, not every notification on the device —
+     * see G-30 in the capture-to-archive integrity audit. Explicitly cleared to
+     * empty by the user still means "speak everything" (same escape hatch
+     * getCaptureApps already has), and an explicit non-empty set of its own
+     * still overrides the mirrored default.
+     */
+    fun getSpeakApps(c: Context): Set<String> = SecureStore.getStringSet(c, "speak_apps", getCaptureApps(c))
     fun setSpeakApps(c: Context, v: Set<String>) = SecureStore.putStringSet(c, "speak_apps", v)
 
     /** True if [pkg] should be spoken: whitelist empty (all) or contains it. */

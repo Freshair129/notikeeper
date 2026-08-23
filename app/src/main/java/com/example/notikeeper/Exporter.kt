@@ -101,9 +101,27 @@ object Exporter {
         return count
     }
 
+    /**
+     * Deletes everything currently in cacheDir/exports. There's no reliable
+     * "the app I shared to is done reading the file" callback from
+     * ACTION_SEND, so a just-shared file can't be deleted the instant the
+     * share sheet closes without risking deleting it out from under a
+     * receiving app that's still reading the stream. What this bounds instead
+     * is unbounded accumulation of decrypted plaintext (exports, the
+     * downloaded update APK) in app-private cache forever — every new export
+     * or update download starts by clearing whatever the previous one left
+     * behind, so at most one plaintext artifact lingers at a time instead of
+     * one per export/update ever run — see G-24 in the capture-to-archive
+     * integrity audit.
+     */
+    fun purgeCache(context: Context) {
+        File(context.cacheDir, "exports").listFiles()?.forEach { it.delete() }
+    }
+
     /** Write to cache via [write] and fire the system share sheet. */
     fun share(context: Context, fileName: String, mime: String, write: (Writer) -> Unit) {
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        purgeCache(context)
         val file = File(dir, fileName)
         file.bufferedWriter(Charsets.UTF_8).use(write)
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)

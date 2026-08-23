@@ -356,6 +356,12 @@ private fun BackupExportScreen(onClose: () -> Unit) {
                 "แชร์ไปได้ทุกที่: Google Drive, อีเมล, Nearby, ส่งเข้าคอม ฯลฯ",
                 style = MaterialTheme.typography.bodySmall
             )
+            Text(
+                "⚠ ไฟล์ที่ส่งออกไม่ได้เข้ารหัส — ใครก็ตามที่เข้าถึงแอปปลายทางหรือโฟลเดอร์ " +
+                    "Downloads จะอ่านข้อความทั้งหมดได้ทันที",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
             Spacer(Modifier.height(10.dp))
             Button(
                 onClick = {

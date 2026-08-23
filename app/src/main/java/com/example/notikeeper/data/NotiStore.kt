@@ -135,17 +135,45 @@ class NotiStore private constructor(
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 3) {
             backupBeforeMigration(oldVersion)
-            db.execSQL("ALTER TABLE notifications ADD COLUMN timeExact INTEGER NOT NULL DEFAULT 0")
-            db.execSQL("ALTER TABLE notifications ADD COLUMN capturedAt INTEGER")
-            db.execSQL("ALTER TABLE notifications ADD COLUMN extractionVersion INTEGER")
-            // The one thing we can actually determine for rows that already exist:
-            // insertNoti has always stored a genuine sbn.postTime, so every existing
-            // noti row's postTime IS exact. Screen rows never had a real observed
-            // time at all (MessengerReaderService has no on-screen timestamp
-            // parsing), so 0 — the column default — is already the honest answer
-            // for them; nothing to backfill there.
-            db.execSQL("UPDATE notifications SET timeExact = 1 WHERE source = 'noti'")
+            // Explicit transaction (not just discipline about additive-only DDL,
+            // see the comment above this method) so a failure partway through —
+            // the ALTER TABLEs ran, the backfill UPDATE didn't, or vice versa —
+            // rolls back to the exact pre-migration schema instead of leaving the
+            // database in a half-migrated state onOpen has never seen before. See
+            // G-26 in the capture-to-archive integrity audit.
+            db.beginTransaction()
+            try {
+                db.execSQL("ALTER TABLE notifications ADD COLUMN timeExact INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE notifications ADD COLUMN capturedAt INTEGER")
+                db.execSQL("ALTER TABLE notifications ADD COLUMN extractionVersion INTEGER")
+                // The one thing we can actually determine for rows that already exist:
+                // insertNoti has always stored a genuine sbn.postTime, so every existing
+                // noti row's postTime IS exact. Screen rows never had a real observed
+                // time at all (MessengerReaderService has no on-screen timestamp
+                // parsing), so 0 — the column default — is already the honest answer
+                // for them; nothing to backfill there.
+                db.execSQL("UPDATE notifications SET timeExact = 1 WHERE source = 'noti'")
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
         }
+    }
+
+    /**
+     * The framework default already throws SQLiteException on a downgrade
+     * (installing an older app version over a newer database), which
+     * [get]'s catch below already handles safely — the unreadable file gets
+     * quarantined by rename, never deleted, and the app starts fresh. This
+     * override exists only to give that catch a message it can tell apart
+     * from an actual passphrase mismatch: the catch's notice was written for
+     * "the Keystore key doesn't match", and a downgrade is a completely
+     * different situation the owner would investigate differently — see G-26.
+     */
+    override fun onDowngrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        throw SQLiteException(
+            "DOWNGRADE: installed app (schema v$newVersion) is older than the database (schema v$oldVersion)"
+        )
     }
 
     /**
@@ -616,8 +644,15 @@ class NotiStore private constructor(
                             val src = File(dbFile.path + suffix)
                             if (src.exists()) src.renameTo(File(quarantineBase + suffix))
                         }
-                        lastRecoveryNotice = "เปิดฐานข้อมูลเดิมไม่ได้ (กุญแจไม่ตรง) — " +
-                            "เริ่มฐานข้อมูลใหม่แล้ว ไฟล์เดิมสำรองไว้ที่ ${File(quarantineBase).name}"
+                        // onDowngrade (above) throws a recognizably-tagged SQLiteException
+                        // for exactly this branch, so a stale-app-version cause doesn't get
+                        // misreported as a Keystore key problem — see G-26.
+                        lastRecoveryNotice = if (e.message?.startsWith("DOWNGRADE:") == true)
+                            "แอปรุ่นนี้เก่ากว่าฐานข้อมูลเดิม (ติดตั้งแอปรุ่นเก่าทับรุ่นใหม่กว่า) — " +
+                                "เริ่มฐานข้อมูลใหม่แล้ว ไฟล์เดิมสำรองไว้ที่ ${File(quarantineBase).name}"
+                        else
+                            "เปิดฐานข้อมูลเดิมไม่ได้ (กุญแจไม่ตรง) — " +
+                                "เริ่มฐานข้อมูลใหม่แล้ว ไฟล์เดิมสำรองไว้ที่ ${File(quarantineBase).name}"
                         NotiStore(appCtx, passphrase)
                     }
                     instance = store

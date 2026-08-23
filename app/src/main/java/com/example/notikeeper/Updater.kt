@@ -107,6 +107,10 @@ object Updater {
         withContext(Dispatchers.IO) {
             require(isHttps(apkUrl)) { "refusing a non-HTTPS APK URL" }
             val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+            // Same cache dir Exporter's plaintext exports use, and the same
+            // "clear it out before writing the next thing" bound on how long a
+            // plaintext artifact can linger there — see Exporter.purgeCache / G-24.
+            Exporter.purgeCache(context)
             val file = File(dir, "update.apk")
             val conn = (URL(apkUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 15000

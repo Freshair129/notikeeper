@@ -20,6 +20,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Sender prefix in noti / screen text — "John: hi" → ["John", "hi"]. */
 const SENDER_PREFIX_RE = /^([^:：\n]{1,40})[:：]\s+(.+)$/s;
 
+/**
+ * Every producer this pipeline actually controls (Exporter.kt, scraper.mjs,
+ * adb-scraper.mjs, fb-import.mjs's Facebook timestamp_ms) already sends
+ * genuine milliseconds. But nothing at the /ingest boundary has ever checked
+ * that — a second-precision source (10 digits, e.g. a raw external export
+ * like the yuzup_raw.json seen during the capture-to-archive integrity audit,
+ * G-27) would silently pass through as milliseconds and date every row to
+ * within a day of the Unix epoch. ms-epoch "now" is ~13 digits (1.7e12+);
+ * seconds-epoch "now" is ~10 digits (1.7e9-ish) — a value under 1e12 is
+ * unambiguously seconds, not milliseconds, with orders of magnitude of
+ * margin either way. Garbage (non-finite, <= 0) is left as-is: scaling a
+ * nonsense number into a different nonsense number isn't this function's job.
+ */
+function normalizeTimeMs(t) {
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return t;
+  return n < 1e12 ? Math.round(n * 1000) : n;
+}
+
 /** Words that look like UI chrome rather than real messages. */
 const CHROME_WORDS = new Set([
   // Status / chat UI
@@ -288,6 +307,7 @@ function parseRow(r) {
   const text = (r.text || "").trim();
   const source = r.source;
   const side = r.side || null;
+  const time = normalizeTimeMs(r.time);
 
   if (!app || !text) return null;
   // Skip system app noise outright — these never carry real messages.
@@ -330,7 +350,7 @@ function parseRow(r) {
   // ADB scraper supplies the real sender name (from Messenger's a11y description).
   if (r.sender && String(r.sender).trim()) {
     senderName = String(r.sender).trim();
-    return { app, pkg, threadName, senderName, text, time: r.time, source, side, timeExact, rawId: r.id };
+    return { app, pkg, threadName, senderName, text, time, source, side, timeExact, rawId: r.id };
   }
 
   if (source === "noti") {
@@ -370,7 +390,7 @@ function parseRow(r) {
     if (senderName.length > 60) senderName = senderName.slice(0, 60);
   }
 
-  return { app, pkg, threadName, senderName, text, time: r.time, source, side: finalSide, timeExact, rawId: r.id };
+  return { app, pkg, threadName, senderName, text, time, source, side: finalSide, timeExact, rawId: r.id };
 }
 
 /** ETL the full rows list. Skips rows already imported via raw_key. Returns counts. */
