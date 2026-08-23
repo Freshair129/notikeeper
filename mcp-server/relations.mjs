@@ -91,7 +91,25 @@ export function openDb(filePath) {
     .get();
   initSchema(db);
   if (!ftsExisted) backfillFts(db);
+  migrateTimeExactColumn(db);
   return db;
+}
+
+/**
+ * Adds messages.time_exact to a relations.db that predates it (see G-09/G-36
+ * in the capture-to-archive integrity audit). `CREATE TABLE IF NOT EXISTS` in
+ * initSchema only helps a brand-new database — it never adds a column to a
+ * `messages` table that already exists — so an existing archive needs this
+ * explicit, guarded ALTER TABLE instead. Idempotent: checks PRAGMA
+ * table_info first and does nothing if the column is already there, so this
+ * is safe to call on every openDb() rather than needing its own version flag.
+ */
+function migrateTimeExactColumn(db) {
+  const hasColumn = db.prepare("PRAGMA table_info(messages)").all()
+    .some((c) => c.name === "time_exact");
+  if (!hasColumn) {
+    db.exec("ALTER TABLE messages ADD COLUMN time_exact INTEGER");
+  }
 }
 
 function initSchema(db) {
@@ -137,7 +155,13 @@ function initSchema(db) {
       side TEXT,                        -- "me" | "them" | NULL
       text TEXT NOT NULL,
       time INTEGER NOT NULL,
-      source TEXT NOT NULL,             -- "noti" | "screen"
+      source TEXT NOT NULL,             -- "noti" | "screen" | "scrape" | "adb-scrape"
+      -- Whether "time" is a genuinely observed time (1), a capture-time
+      -- approximation (0), or unknown because this row predates the column
+      -- (NULL) -- see G-09/G-36. Fed by the phone's own timeExact and by the
+      -- scrapers' pre-existing time_exact field, which used to be emitted
+      -- and then discarded at every downstream boundary.
+      time_exact INTEGER,
       reply_to_id INTEGER,
       read_at INTEGER,
       raw_id INTEGER,                   -- original id in data.jsonl
@@ -236,8 +260,8 @@ function stmts(db) {
                                last_msg  = MAX(last_msg,  excluded.last_msg)
                              RETURNING id, is_group`),
     insertMsg:  db.prepare(`INSERT OR IGNORE INTO messages
-                           (thread_id, sender_id, side, text, time, source, raw_id, raw_key)
-                           VALUES(?, ?, ?, ?, ?, ?, ?, ?)`),
+                           (thread_id, sender_id, side, text, time, source, time_exact, raw_id, raw_key)
+                           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     addParticipant: db.prepare(`INSERT OR IGNORE INTO participants(thread_id, user_id) VALUES(?, ?)`),
     incUserMsg: db.prepare(`UPDATE users SET message_count = message_count + 1,
                              last_seen = MAX(last_seen, ?) WHERE id = ?`),
@@ -291,10 +315,18 @@ function parseRow(r) {
   let threadName = title || "(no title)";
   let senderName = null;
 
+  // time_exact travels on the raw row itself now (Exporter.kt on the phone,
+  // scraper.mjs/adb-scraper.mjs on the PC — see G-09). A row from before any
+  // producer sent it defaults the same way NotiStore's own v2->v3 migration
+  // backfill does: a noti row's `time` has always been a genuine sbn.postTime;
+  // nothing else on this pipeline has ever had an actually observed time.
+  const timeExact = typeof r.time_exact === "boolean" ? (r.time_exact ? 1 : 0)
+    : source === "noti" ? 1 : 0;
+
   // ADB scraper supplies the real sender name (from Messenger's a11y description).
   if (r.sender && String(r.sender).trim()) {
     senderName = String(r.sender).trim();
-    return { app, pkg, threadName, senderName, text, time: r.time, source, side, rawId: r.id };
+    return { app, pkg, threadName, senderName, text, time: r.time, source, side, timeExact, rawId: r.id };
   }
 
   if (source === "noti") {
@@ -311,14 +343,30 @@ function parseRow(r) {
     else if (side === "them") senderName = title.trim() || null;
   }
 
-  if (senderName === "" || senderName === title && side === "them") {
-    // okay, leave as-is
+  // Determine message side:
+  // - Already explicit (from screen-capture pixel inference) -> keep it as-is.
+  // - source === "noti" -> always "them": a notification is by definition
+  //   something arriving FROM someone else, not a structural guess.
+  // - No side AND a real sender name was found -> "them" is a safe inference;
+  //   nobody's own outgoing message gets attributed to a named sender.
+  // - No side AND no sender name -> genuinely no evidence either way. Rather
+  //   than default this to "me" (an extraction failure turned into a positive
+  //   claim that the device owner wrote a message they may never have sent —
+  //   see G-14 in the capture-to-archive integrity audit), unknown authorship
+  //   stays unknown: side stays null, which the schema already allows —
+  //   "me" | "them" | NULL.
+  let finalSide = side;
+  if (source === "noti") {
+    finalSide = "them";
+  } else if (!finalSide) {
+    finalSide = senderName ? "them" : null;
   }
+
   if (senderName) {
     if (senderName.length > 60) senderName = senderName.slice(0, 60);
   }
 
-  return { app, pkg, threadName, senderName, text, time: r.time, source, side, rawId: r.id };
+  return { app, pkg, threadName, senderName, text, time: r.time, source, side: finalSide, timeExact, rawId: r.id };
 }
 
 /** ETL the full rows list. Skips rows already imported via raw_key. Returns counts. */
@@ -330,7 +378,7 @@ export function reindex(db, rows) {
     for (const r of batch) {
       const parsed = parseRow(r);
       if (!parsed) { skipped++; continue; }
-      const { app, pkg, threadName, senderName, text, time, source, side, rawId } = parsed;
+      const { app, pkg, threadName, senderName, text, time, source, side, timeExact, rawId } = parsed;
       const rawKey = `${source}|${rawId}|${time}`;
 
       const appRow = s.upsertApp.get(app, pkg || null);
@@ -341,7 +389,7 @@ export function reindex(db, rows) {
         senderId = u.id;
         s.addParticipant.run(thread.id, senderId);
       }
-      const info = s.insertMsg.run(thread.id, senderId, side, text, time, source, rawId, rawKey);
+      const info = s.insertMsg.run(thread.id, senderId, side, text, time, source, timeExact, rawId, rawKey);
       if (info.changes === 1) {
         inserted++;
         if (senderId != null) s.incUserMsg.run(time, senderId);
@@ -457,7 +505,7 @@ export function getThread(db, id, { limit = 500 } = {}) {
     WHERE t.id = ?`).get(id);
   if (!t) return null;
   const messages = db.prepare(`
-    SELECT m.id, m.time, m.source, m.side, m.text, m.reply_to_id,
+    SELECT m.id, m.time, m.source, m.side, m.text, m.reply_to_id, m.time_exact,
            u.name AS sender
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
     WHERE m.thread_id = ?

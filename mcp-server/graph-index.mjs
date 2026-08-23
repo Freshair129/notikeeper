@@ -120,7 +120,7 @@ export async function rebuildFromSqlite(sqlite) {
   const apps    = sqlite.prepare("SELECT id, name, pkg FROM apps").all();
   const threads = sqlite.prepare("SELECT id, app_id, name, is_group, message_count, first_msg, last_msg FROM threads").all();
   const users   = sqlite.prepare("SELECT id, name, message_count, first_seen, last_seen FROM users").all();
-  const msgs    = sqlite.prepare("SELECT id, thread_id, sender_id, side, text, time, source FROM messages").all();
+  const msgs    = sqlite.prepare("SELECT id, thread_id, sender_id, side, text, time, source, time_exact FROM messages").all();
   const parts   = sqlite.prepare("SELECT thread_id, user_id FROM participants").all();
 
   const nodes = [];
@@ -148,7 +148,8 @@ export async function rebuildFromSqlite(sqlite) {
       id: msgId(m.id),
       labels: ["Message", sourceLabel(m.source)],
       props: { text: m.text, side: m.side, time: m.time,
-               thread_id: m.thread_id, sender_id: m.sender_id, source: m.source },
+               thread_id: m.thread_id, sender_id: m.sender_id, source: m.source,
+               time_exact: m.time_exact },
     });
   }
 

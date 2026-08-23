@@ -32,6 +32,12 @@ import java.net.URLEncoder
  */
 object Exporter {
 
+    // time_exact/captured_at/extraction_version: snake_case on the wire to match
+    // scraper.mjs/adb-scraper.mjs's pre-existing time_exact field (see G-09/G-36
+    // in the capture-to-archive integrity audit) rather than introducing a second
+    // naming convention the server would need to reconcile. optNullable* omits
+    // the key entirely for a null value rather than writing JSON null, matching
+    // how absent fields already work for older/pre-migration rows.
     private fun rowToJson(it: NotiItem): JSONObject = JSONObject().apply {
         put("id", it.id)
         put("source", it.source)
@@ -41,6 +47,9 @@ object Exporter {
         put("text", it.text)
         put("side", it.side)
         put("time", it.postTime)
+        put("time_exact", it.timeExact)
+        it.capturedAt?.let { c -> put("captured_at", c) }
+        it.extractionVersion?.let { v -> put("extraction_version", v) }
     }
 
     /** Used by the upload path, which POSTs a bounded batch as one JSON body. */
@@ -72,7 +81,7 @@ object Exporter {
 
     /** Streams [rows] to [writer] as CSV, one line at a time. Returns the row count. */
     fun writeCsvRows(writer: Writer, rows: Sequence<NotiItem>): Int {
-        writer.write("id,source,app,title,text,side,time\n")
+        writer.write("id,source,app,title,text,side,time,time_exact,captured_at,extraction_version\n")
         var count = 0
         for (it in rows) {
             writer.write(it.id.toString())
@@ -82,7 +91,10 @@ object Exporter {
             writer.write(csv(it.title)); writer.write(",")
             writer.write(csv(it.text)); writer.write(",")
             writer.write(csv(it.side)); writer.write(",")
-            writer.write(it.postTime.toString())
+            writer.write(it.postTime.toString()); writer.write(",")
+            writer.write(if (it.timeExact) "1" else "0"); writer.write(",")
+            writer.write(it.capturedAt?.toString() ?: ""); writer.write(",")
+            writer.write(it.extractionVersion?.toString() ?: "")
             writer.write("\n")
             count++
         }

@@ -443,10 +443,20 @@ function filterRows({ query, app, source, sinceMs, untilMs, sinceId, denoise = f
   });
 }
 
-const fmt = (r) =>
-  `[${new Date(r.time).toLocaleString()}] ${r.app}` +
-  `${r.title ? " · " + r.title : ""}` +
-  `${r.side ? " (" + r.side + ")" : ""}: ${r.text}`;
+// source + a "~" time marker when the timestamp isn't a genuinely observed
+// one (see G-11/G-09 in the capture-to-archive integrity audit — this used
+// to render identically whether a row was a full scraped message or a
+// truncated notification preview, and whether its time was a real send time
+// or a capture-time guess; an AI reading this output had no way to tell).
+// r.time_exact === true is the only case treated as exact — undefined
+// (legacy rows from before this field existed) is honestly unknown, not
+// assumed exact.
+const fmt = (r) => {
+  const approx = r.time_exact === true ? "" : "~";
+  return `[${approx}${new Date(r.time).toLocaleString()}] ${r.app} · ${r.source}` +
+    `${r.title ? " · " + r.title : ""}` +
+    `${r.side ? " (" + r.side + ")" : ""}: ${r.text}`;
+};
 
 // ---------- HTTP server ----------
 /**
@@ -1113,13 +1123,24 @@ mcp.tool("stats", {}, async () => {
 
 // ===== Semantic / graph tools (Phase B: BGE-M3 1024d + GenesisBlock) =====
 
-/** Format a hybridSearch / neighbors hit for Claude — readable text line. */
+/**
+ * Format a hybridSearch / neighbors hit for Claude — readable text line.
+ *
+ * Reads p.source directly rather than matching against n.labels the way this
+ * used to (`labels.find(l => l === "Notification" || l === "ScreenLine")`) —
+ * that list was two source values behind current: adding "ScrapedMessage"
+ * and "UnknownSource" to sourceLabel() (see G-22) would have silently
+ * produced an empty tag for exactly the rows G-22 was about, the same class
+ * of bug this whole function exists to prevent. props.source is the raw
+ * value already, so there's nothing to keep in sync.
+ */
 function fmtHit(hit) {
   const n = hit.node || hit;
   const p = n.props || {};
-  const time = p.time ? new Date(p.time).toLocaleString() : "";
+  const approx = p.time_exact === 1 ? "" : "~";
+  const time = p.time ? approx + new Date(p.time).toLocaleString() : "";
   const where = p.thread_id ? `t:${p.thread_id}` : "";
-  const tag = (n.labels || []).find((l) => l === "Notification" || l === "ScreenLine") || "";
+  const tag = p.source || "";
   const score = hit.score != null ? ` (score=${hit.score.toFixed(3)})` : "";
   return `[${time}] ${n.id} ${tag} ${where}${score}: ${p.text ?? p.name ?? ""}`.trim();
 }
@@ -1248,10 +1269,16 @@ mcp.tool(
     const t = getThread(RDB, id, { limit });
     if (!t) return { content: [{ type: "text", text: "thread not found" }] };
     const head = `Thread #${t.id} [${t.app}] "${t.name}" — ${t.message_count} msgs, participants: ${t.participants.map(p => p.name).join(", ")}`;
+    // Includes source and a time_exact marker — this is the tool's own doc
+    // comment's evidence citation for G-11: getThread already selected
+    // m.source, this loop just never printed it, so a scraped message and a
+    // notification preview rendered identically. "?" for m.sender already
+    // covers unknown authorship reasonably (see G-14) — untouched here.
     const lines = t.messages.map((m) => {
-      const time = new Date(m.time).toLocaleString();
+      const approx = m.time_exact === 1 ? "" : "~";
+      const time = approx + new Date(m.time).toLocaleString();
       const who = m.side === "me" ? "me" : (m.sender || "?");
-      return `[${time}] ${who}: ${m.text}`;
+      return `[${time}] ${m.source} ${who}: ${m.text}`;
     });
     return { content: [{ type: "text", text: head + "\n" + lines.join("\n") }] };
   }

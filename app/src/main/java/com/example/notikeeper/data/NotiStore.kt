@@ -3,11 +3,25 @@ package com.example.notikeeper.data
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteException
+import com.example.notikeeper.BuildConfig
 import net.sqlcipher.database.SQLiteDatabase
 import net.sqlcipher.database.SQLiteOpenHelper
 import java.io.File
 
-/** One captured row. `source` = "noti" (from notification) or "screen" (from accessibility read). */
+/**
+ * One captured row. `source` = "noti" (from notification) or "screen" (from
+ * accessibility read).
+ *
+ * [timeExact], [capturedAt], and [extractionVersion] are the provenance this
+ * row didn't used to carry (see the capture-to-archive integrity audit,
+ * G-36/G-09/G-10): every consumer — search, export, upload, the MCP tools —
+ * used to receive [postTime] as if it always meant "this message was sent at
+ * this time," with no way to tell a real `sbn.postTime` apart from a screen
+ * capture's wall-clock approximation. They're nullable/default-false only for
+ * rows written before this column existed (backfilled where the answer is
+ * actually knowable — see NotiStore's onUpgrade); every row inserted from now
+ * on populates all three.
+ */
 data class NotiItem(
     val id: Long,
     val source: String,
@@ -16,8 +30,26 @@ data class NotiItem(
     val title: String,   // notification title OR conversation/contact name
     val text: String,    // message / line
     val side: String,    // "" | "me" | "them"  (screen capture only)
-    val postTime: Long
+    val postTime: Long,
+    /** True only when [postTime] is a genuinely observed time (a notification's
+     *  real `sbn.postTime`) rather than the capture tick a screen row is stamped
+     *  with — see the class doc above. */
+    val timeExact: Boolean = false,
+    /** Wall-clock time this row was captured/inserted — always accurate, unlike
+     *  [postTime], which is only exact when [timeExact] is true. Null for rows
+     *  written before this column existed. */
+    val capturedAt: Long? = null,
+    /** `BuildConfig.VERSION_CODE` at capture time — which build's extraction
+     *  logic (chrome filters, side inference, sender parsing, ...) produced
+     *  this row. Null for rows written before this column existed. */
+    val extractionVersion: Int? = null
 )
+
+/** Column list + cursor mapping shared by every SELECT that builds [NotiItem]s, so
+ *  the four near-identical query functions in [NotiStore] can't drift out of sync
+ *  with each other (or with [NotiItem]'s fields) one column at a time. */
+private const val ITEM_COLUMNS =
+    "id,source,pkg,appName,title,text,side,postTime,timeExact,capturedAt,extractionVersion"
 
 /** A single line read off the Messenger screen by the AccessibilityService. */
 data class ScreenRow(
@@ -37,7 +69,12 @@ data class ScreenRow(
 class NotiStore private constructor(
     context: Context,
     private val passphrase: String
-) : SQLiteOpenHelper(context.applicationContext, "noti.db", null, 2) {
+) : SQLiteOpenHelper(context.applicationContext, "noti.db", null, 3) {
+
+    // SQLiteOpenHelper doesn't expose the context it was built with, and
+    // onUpgrade/backupBeforeMigration need one — retained explicitly rather
+    // than relying on a base-class internal that isn't part of its public API.
+    private val appContext: Context = context.applicationContext
 
     private val database: SQLiteDatabase by lazy { getWritableDatabase(passphrase) }
 
@@ -52,7 +89,10 @@ class NotiStore private constructor(
                  text TEXT NOT NULL,
                  side TEXT NOT NULL DEFAULT '',
                  postTime INTEGER NOT NULL,
-                 dedupKey TEXT
+                 dedupKey TEXT,
+                 timeExact INTEGER NOT NULL DEFAULT 0,
+                 capturedAt INTEGER,
+                 extractionVersion INTEGER
                )"""
         )
         db.execSQL("CREATE UNIQUE INDEX idx_dedup ON notifications(dedupKey)")
@@ -62,10 +102,62 @@ class NotiStore private constructor(
     // The phone is becoming a capture buffer whose rows must survive schema
     // bumps (see docs/ARCHITECTURE_CHANGE_REQUEST.md) — the PC is only ever
     // caught up via uploads it acknowledged, so dropping the table here would
-    // silently destroy un-acked data. No schema change is pending, so this is
-    // a no-op; future migrations must be additive (ALTER TABLE / CREATE INDEX
-    // IF NOT EXISTS), never a DROP.
+    // silently destroy un-acked data. Future migrations must stay additive
+    // (ALTER TABLE / CREATE INDEX IF NOT EXISTS), never a DROP — and every
+    // branch here must leave the schema identical to what onCreate produces
+    // on a fresh install, since nothing else enforces that the two stay
+    // in sync (see G-26 in the capture-to-archive integrity audit: there is
+    // still no real migration framework, just this method and discipline).
+    //
+    // version 2 -> 3 is the app's first real migration (see G-36/G-09/G-10):
+    // adds timeExact/capturedAt/extractionVersion, purely additive columns —
+    // ALTER TABLE ADD COLUMN never touches existing rows' other data, and a
+    // failure partway through (columns added, backfill not yet run) still
+    // leaves a queryable database, just with timeExact defaulted to 0 for
+    // some noti rows that are actually exact — wrong but not corrupt, and the
+    // backfill is idempotent (safe to have run zero or one times either way).
+    //
+    // Backed up first: this is the first ALTER TABLE this app has ever run
+    // against a real installed database, and it cannot be device-tested in
+    // the environment that wrote it (no emulator/device attached — see the
+    // commit this shipped in). If anything here is wrong, the owner has an
+    // exact byte-for-byte copy of their pre-migration archive to fall back to.
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 3) {
+            backupBeforeMigration(oldVersion)
+            db.execSQL("ALTER TABLE notifications ADD COLUMN timeExact INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE notifications ADD COLUMN capturedAt INTEGER")
+            db.execSQL("ALTER TABLE notifications ADD COLUMN extractionVersion INTEGER")
+            // The one thing we can actually determine for rows that already exist:
+            // insertNoti has always stored a genuine sbn.postTime, so every existing
+            // noti row's postTime IS exact. Screen rows never had a real observed
+            // time at all (MessengerReaderService has no on-screen timestamp
+            // parsing), so 0 — the column default — is already the honest answer
+            // for them; nothing to backfill there.
+            db.execSQL("UPDATE notifications SET timeExact = 1 WHERE source = 'noti'")
+        }
+    }
+
+    /**
+     * Copies noti.db (+ -journal/-wal/-shm, whichever exist) to a
+     * `.pre-migration-vN-<timestamp>` sibling before onUpgrade touches
+     * anything. Best-effort: a failure here logs and lets the migration
+     * proceed rather than blocking the app from opening over a backup it
+     * couldn't take — but it's tried, because this exact migration is the
+     * one part of this release that couldn't be verified against a real
+     * device before shipping.
+     */
+    private fun backupBeforeMigration(oldVersion: Int) {
+        runCatching {
+            val dbFile = appContext.getDatabasePath("noti.db")
+            val backupBase = "${dbFile.path}.pre-migration-v$oldVersion-${System.currentTimeMillis()}"
+            for (suffix in listOf("", "-journal", "-wal", "-shm")) {
+                val src = File(dbFile.path + suffix)
+                if (src.exists()) src.copyTo(File(backupBase + suffix), overwrite = true)
+            }
+        }.onFailure {
+            android.util.Log.w("NotiStore", "pre-migration backup failed, proceeding anyway", it)
+        }
     }
 
     /** Insert one captured notification (background, app-wide). */
@@ -78,6 +170,12 @@ class NotiStore private constructor(
             put("text", text)
             put("side", "")
             put("postTime", postTime)
+            // postTime here IS a genuine sbn.postTime handed to us by the OS — the
+            // one case in this whole pipeline where "postTime" already means what
+            // it says. See NotiItem's doc comment.
+            put("timeExact", 1)
+            put("capturedAt", System.currentTimeMillis())
+            put("extractionVersion", BuildConfig.VERSION_CODE)
             // Dedup on content plus a COARSE time bucket, not exact time and not
             // content alone. Content-only (no time at all) was tried — it collapses
             // a spam channel's identical repost, but it ALSO collapses a genuine
@@ -117,6 +215,13 @@ class NotiStore private constructor(
                     put("text", r.text)
                     put("side", r.side)
                     put("postTime", r.postTime)
+                    // timeExact is 0/false here deliberately: r.postTime is the
+                    // capture-tick wall clock (see MessengerReaderService — there is
+                    // no on-screen timestamp parsing on-device), not an observed send
+                    // time, and it's also the honest value for capturedAt since the
+                    // two are the same wall-clock moment for this source.
+                    put("capturedAt", r.postTime)
+                    put("extractionVersion", BuildConfig.VERSION_CODE)
                     put("dedupKey", "screen:${r.sender}:${r.side}:${r.text}")
                 }
                 db.insertWithOnConflict(
@@ -129,19 +234,33 @@ class NotiStore private constructor(
         }
     }
 
+    private fun cursorToNotiItem(c: android.database.Cursor): NotiItem = NotiItem(
+        id = c.getLong(0),
+        source = c.getString(1),
+        pkg = c.getString(2),
+        appName = c.getString(3),
+        title = c.getString(4),
+        text = c.getString(5),
+        side = c.getString(6),
+        postTime = c.getLong(7),
+        timeExact = c.getInt(8) != 0,
+        capturedAt = if (c.isNull(9)) null else c.getLong(9),
+        extractionVersion = if (c.isNull(10)) null else c.getInt(10)
+    )
+
     /** Empty search = newest first. Otherwise match app/contact name, sender, or message. */
     fun query(search: String): List<NotiItem> {
         val db = database
         val cursor = if (search.isBlank()) {
             db.rawQuery(
-                "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications " +
+                "SELECT $ITEM_COLUMNS FROM notifications " +
                     "ORDER BY postTime DESC, id DESC LIMIT 5000",
                 null
             )
         } else {
             val like = "%$search%"
             db.rawQuery(
-                "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications " +
+                "SELECT $ITEM_COLUMNS FROM notifications " +
                     "WHERE appName LIKE ? OR title LIKE ? OR text LIKE ? " +
                     "ORDER BY postTime DESC, id DESC LIMIT 5000",
                 arrayOf(like, like, like)
@@ -149,20 +268,7 @@ class NotiStore private constructor(
         }
         val result = ArrayList<NotiItem>()
         cursor.use {
-            while (it.moveToNext()) {
-                result.add(
-                    NotiItem(
-                        id = it.getLong(0),
-                        source = it.getString(1),
-                        pkg = it.getString(2),
-                        appName = it.getString(3),
-                        title = it.getString(4),
-                        text = it.getString(5),
-                        side = it.getString(6),
-                        postTime = it.getLong(7)
-                    )
-                )
-            }
+            while (it.moveToNext()) result.add(cursorToNotiItem(it))
         }
         return result
     }
@@ -197,26 +303,13 @@ class NotiStore private constructor(
      */
     fun querySince(afterId: Long): List<NotiItem> {
         val cursor = database.rawQuery(
-            "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications " +
+            "SELECT $ITEM_COLUMNS FROM notifications " +
                 "WHERE id > ? ORDER BY id ASC LIMIT 20000",
             arrayOf(afterId.toString())
         )
         val result = ArrayList<NotiItem>()
         cursor.use {
-            while (it.moveToNext()) {
-                result.add(
-                    NotiItem(
-                        id = it.getLong(0),
-                        source = it.getString(1),
-                        pkg = it.getString(2),
-                        appName = it.getString(3),
-                        title = it.getString(4),
-                        text = it.getString(5),
-                        side = it.getString(6),
-                        postTime = it.getLong(7)
-                    )
-                )
-            }
+            while (it.moveToNext()) result.add(cursorToNotiItem(it))
         }
         return result
     }
@@ -239,49 +332,23 @@ class NotiStore private constructor(
      */
     fun allRows(): Sequence<NotiItem> = sequence {
         database.rawQuery(
-            "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications ORDER BY id ASC",
+            "SELECT $ITEM_COLUMNS FROM notifications ORDER BY id ASC",
             null
         ).use { cursor ->
-            while (cursor.moveToNext()) {
-                yield(
-                    NotiItem(
-                        id = cursor.getLong(0),
-                        source = cursor.getString(1),
-                        pkg = cursor.getString(2),
-                        appName = cursor.getString(3),
-                        title = cursor.getString(4),
-                        text = cursor.getString(5),
-                        side = cursor.getString(6),
-                        postTime = cursor.getLong(7)
-                    )
-                )
-            }
+            while (cursor.moveToNext()) yield(cursorToNotiItem(cursor))
         }
     }
 
     /** Every message in one conversation (same pkg + title), newest first — for the thread detail view. */
     fun threadMessages(pkg: String, title: String): List<NotiItem> {
         val cursor = database.rawQuery(
-            "SELECT id,source,pkg,appName,title,text,side,postTime FROM notifications " +
+            "SELECT $ITEM_COLUMNS FROM notifications " +
                 "WHERE pkg = ? AND title = ? ORDER BY postTime DESC, id DESC LIMIT 2000",
             arrayOf(pkg, title)
         )
         val result = ArrayList<NotiItem>()
         cursor.use {
-            while (it.moveToNext()) {
-                result.add(
-                    NotiItem(
-                        id = it.getLong(0),
-                        source = it.getString(1),
-                        pkg = it.getString(2),
-                        appName = it.getString(3),
-                        title = it.getString(4),
-                        text = it.getString(5),
-                        side = it.getString(6),
-                        postTime = it.getLong(7)
-                    )
-                )
-            }
+            while (it.moveToNext()) result.add(cursorToNotiItem(it))
         }
         return result
     }
