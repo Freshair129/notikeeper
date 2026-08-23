@@ -91,6 +91,32 @@ internal fun gapDedupKey(service: String, gapStartMs: Long, gapEndMs: Long): Str
     "gap:$service:$gapStartMs:$gapEndMs"
 
 /**
+ * Builds the SQL + bind args for [NotiStore.query] — pulled out as a pure
+ * function (no SQLiteDatabase involved) so the keyset-pagination logic (see
+ * G-18) is unit-testable without a device, same reasoning as the dedupKey
+ * builders above. `$ITEM_COLUMNS`/`NotiStore.QUERY_LIMIT` are interpolated
+ * directly (never user input), only `search`/`before` ever become bind args.
+ */
+internal fun buildQuerySql(search: String, before: Pair<Long, Long>?): Pair<String, Array<String>> {
+    val cursorClause = if (before != null) "(postTime < ? OR (postTime = ? AND id < ?))" else null
+    val cursorArgs: (List<String>) -> List<String> = { base ->
+        if (before != null) base + listOf(before.first.toString(), before.first.toString(), before.second.toString())
+        else base
+    }
+    return if (search.isBlank()) {
+        val where = cursorClause?.let { "WHERE $it" } ?: ""
+        "SELECT $ITEM_COLUMNS FROM notifications $where " +
+            "ORDER BY postTime DESC, id DESC LIMIT ${NotiStore.QUERY_LIMIT}" to cursorArgs(emptyList()).toTypedArray()
+    } else {
+        val like = "%$search%"
+        val extra = cursorClause?.let { " AND $it" } ?: ""
+        "SELECT $ITEM_COLUMNS FROM notifications " +
+            "WHERE (appName LIKE ? OR title LIKE ? OR text LIKE ?)$extra " +
+            "ORDER BY postTime DESC, id DESC LIMIT ${NotiStore.QUERY_LIMIT}" to cursorArgs(listOf(like, like, like)).toTypedArray()
+    }
+}
+
+/**
  * Encrypted SQLite store (SQLCipher / AES-256). The whole `noti.db` file is
  * unreadable without the passphrase from [DbKey]. Otherwise behaves like the
  * plain version: singleton, idempotent inserts via a UNIQUE dedupKey.
@@ -371,26 +397,23 @@ class NotiStore private constructor(
 
     /**
      * Empty search = newest first. Otherwise match app/contact name, sender, or
-     * message. Capped at [QUERY_LIMIT] — see the constant's own doc comment for
-     * why the caller needs to know that number, not just this function.
+     * message. Capped at [QUERY_LIMIT] per call — see the constant's own doc
+     * comment for why the caller needs to know that number, not just this
+     * function.
+     *
+     * [before], when given, is a (postTime, id) cursor from the last row of a
+     * previous page — the same tie-break the ORDER BY already uses, so paging
+     * through can't skip or repeat a row even when several share a postTime
+     * (screen rows especially, all stamped with the same capture-tick wall
+     * clock). Real pagination, not just a bigger single page: G-18 in the
+     * capture-to-archive integrity audit flagged "no pagination" as a
+     * separate problem from the unindexed LIKE scan itself, and one that
+     * doesn't need a schema change to fix — this is the additive half of
+     * that finding; the FTS-index half is still deferred (see FeedScreen.kt).
      */
-    fun query(search: String): List<NotiItem> {
-        val db = database
-        val cursor = if (search.isBlank()) {
-            db.rawQuery(
-                "SELECT $ITEM_COLUMNS FROM notifications " +
-                    "ORDER BY postTime DESC, id DESC LIMIT $QUERY_LIMIT",
-                null
-            )
-        } else {
-            val like = "%$search%"
-            db.rawQuery(
-                "SELECT $ITEM_COLUMNS FROM notifications " +
-                    "WHERE appName LIKE ? OR title LIKE ? OR text LIKE ? " +
-                    "ORDER BY postTime DESC, id DESC LIMIT $QUERY_LIMIT",
-                arrayOf(like, like, like)
-            )
-        }
+    fun query(search: String, before: Pair<Long, Long>? = null): List<NotiItem> {
+        val (sql, args) = buildQuerySql(search, before)
+        val cursor = database.rawQuery(sql, args)
         val result = ArrayList<NotiItem>()
         cursor.use {
             while (it.moveToNext()) result.add(cursorToNotiItem(it))

@@ -104,6 +104,13 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
     // integrity audit).
     var debouncedQuery by remember { mutableStateOf("") }
     var items by remember { mutableStateOf(emptyList<NotiItem>()) }
+    // Whether the most recently loaded page came back full (== QUERY_LIMIT) —
+    // the same "hit the cap" signal the truncation notice already used, now
+    // also driving whether "load more" is worth offering. A page shorter
+    // than the cap means the query genuinely ran out of matching rows, not
+    // just that this page's slice of them did. See G-18.
+    var hasMore by remember { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
     var selectedApp by remember { mutableStateOf<String?>(null) }
     var notiOn by remember { mutableStateOf(isNotiAccessEnabled(ctx)) }
     var readerOn by remember { mutableStateOf(isReaderEnabled(ctx)) }
@@ -129,7 +136,9 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
     }
 
     LaunchedEffect(debouncedQuery, refreshKey) {
-        items = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(debouncedQuery) }
+        val page = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(debouncedQuery) }
+        items = page
+        hasMore = page.size == NotiStore.QUERY_LIMIT
         notiOn = isNotiAccessEnabled(ctx)
         readerOn = isReaderEnabled(ctx)
         // NotiStore.get() above is what opens (and, on failure, recovers) the
@@ -138,6 +147,23 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
         NotiStore.lastRecoveryNotice?.let {
             recoveryNotice = it
             NotiStore.clearRecoveryNotice()
+        }
+    }
+
+    // Keyset pagination past the first QUERY_LIMIT rows (G-18) — appends
+    // rather than replacing, cursored off the last (oldest, since ordering
+    // is postTime DESC, id DESC) row already loaded.
+    suspend fun loadMore() {
+        val last = items.lastOrNull() ?: return
+        loadingMore = true
+        try {
+            val page = withContext(Dispatchers.IO) {
+                NotiStore.get(ctx).query(debouncedQuery, before = Pair(last.postTime, last.id))
+            }
+            items = items + page
+            hasMore = page.size == NotiStore.QUERY_LIMIT
+        } finally {
+            loadingMore = false
         }
     }
 
@@ -316,15 +342,16 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     .fillMaxWidth()
                     .padding(12.dp)
             )
-            // items.size hitting the cap exactly is the only signal available
-            // without a separate COUNT query — see NotiStore.QUERY_LIMIT's doc
-            // comment for the trade-off. Silence here is what G-18 flagged:
-            // "unlimited search" was never literally true and said nothing
-            // when it wasn't.
-            if (items.size == NotiStore.QUERY_LIMIT) {
+            // hasMore (last page loaded came back exactly at QUERY_LIMIT) is
+            // the only signal available without a separate COUNT query — see
+            // NotiStore.QUERY_LIMIT's doc comment for the trade-off. Silence
+            // here is what G-18 originally flagged ("unlimited search" was
+            // never literally true and said nothing when it wasn't); now
+            // there's also a real way to actually see the rest, not just a
+            // warning to search more specifically.
+            if (hasMore) {
                 Text(
-                    "แสดง ${NotiStore.QUERY_LIMIT} รายการล่าสุดที่ตรงกัน — อาจมีรายการเก่ากว่านี้ที่ไม่แสดง " +
-                        "ลองค้นหาให้เจาะจงขึ้นเพื่อหาของเก่ากว่านี้",
+                    "แสดง ${items.size} รายการที่ตรงกัน — มีรายการเก่ากว่านี้ กด \"โหลดเพิ่ม\" ด้านล่างเพื่อดูต่อ",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
@@ -332,6 +359,17 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
             }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(filteredItems) { item -> NotiRow(item) }
+                if (hasMore) {
+                    item {
+                        Button(
+                            onClick = { scope.launch { loadMore() } },
+                            enabled = !loadingMore,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp)
+                        ) { Text(if (loadingMore) "กำลังโหลด..." else "โหลดเพิ่ม") }
+                    }
+                }
             }
         }
     }
