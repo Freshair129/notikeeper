@@ -67,6 +67,24 @@ class MessengerReaderService : AccessibilityService() {
 
     private var lastCaptureAt = 0L
 
+    /**
+     * Fires whenever the system (re)binds this accessibility service — first
+     * launch, after the user re-enables it, after an OEM battery killer or a
+     * crash releases it, after reboot. Same gap-detection approach as
+     * NotiLoggerService.onListenerConnected — see its doc comment for why
+     * retroactive detection at reconnection, not a disconnect hook, is the
+     * robust choice here (G-28/G-29).
+     */
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        scope.launch {
+            val ctx = applicationContext
+            val last = com.example.notikeeper.data.Settings.getLastScreenHeartbeat(ctx)
+            val now = NotiStore.get(ctx).recordGapIfAny("screen", last)
+            com.example.notikeeper.data.Settings.setLastScreenHeartbeat(ctx, now)
+        }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
@@ -115,7 +133,12 @@ class MessengerReaderService : AccessibilityService() {
             fresh.add(ScreenRow(pkg, appLabel(pkg), convo, l.text, l.side, now))
         }
         if (fresh.isEmpty()) return
-        scope.launch { NotiStore.get(applicationContext).insertScreenBatch(fresh) }
+        scope.launch {
+            val ctx = applicationContext
+            NotiStore.get(ctx).insertScreenBatch(fresh)
+            // Proof of life for the gap check in onServiceConnected.
+            com.example.notikeeper.data.Settings.setLastScreenHeartbeat(ctx, System.currentTimeMillis())
+        }
 
         // Eyes-free driving mode: read newly-seen lines aloud (only for whitelisted apps).
         if (com.example.notikeeper.data.Settings.getReadAloudScreen(applicationContext) &&

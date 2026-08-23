@@ -86,6 +86,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
 import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -97,6 +98,11 @@ import java.util.Locale
 fun FeedScreen(onNavigateToSettings: () -> Unit) {
     val ctx = LocalContext.current
     var query by remember { mutableStateOf("") }
+    // debouncedQuery is what actually drives the DB query — see the two
+    // LaunchedEffects below. Typing "hello" no longer fires five separate
+    // full-table scans, one per keystroke (see G-18 in the capture-to-archive
+    // integrity audit).
+    var debouncedQuery by remember { mutableStateOf("") }
     var items by remember { mutableStateOf(emptyList<NotiItem>()) }
     var selectedApp by remember { mutableStateOf<String?>(null) }
     var notiOn by remember { mutableStateOf(isNotiAccessEnabled(ctx)) }
@@ -114,8 +120,16 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
         selectedApp?.let { app -> items.filter { it.appName == app } } ?: items
     }
 
-    LaunchedEffect(query, refreshKey) {
-        items = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(query) }
+    // Restarts (cancelling any still-pending delay) on every keystroke, so
+    // only the debounced value the user actually stopped typing at ever
+    // reaches a query — a keystroke never itself triggers a DB read.
+    LaunchedEffect(query) {
+        delay(300)
+        debouncedQuery = query
+    }
+
+    LaunchedEffect(debouncedQuery, refreshKey) {
+        items = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(debouncedQuery) }
         notiOn = isNotiAccessEnabled(ctx)
         readerOn = isReaderEnabled(ctx)
         // NotiStore.get() above is what opens (and, on failure, recovers) the
@@ -302,6 +316,20 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     .fillMaxWidth()
                     .padding(12.dp)
             )
+            // items.size hitting the cap exactly is the only signal available
+            // without a separate COUNT query — see NotiStore.QUERY_LIMIT's doc
+            // comment for the trade-off. Silence here is what G-18 flagged:
+            // "unlimited search" was never literally true and said nothing
+            // when it wasn't.
+            if (items.size == NotiStore.QUERY_LIMIT) {
+                Text(
+                    "แสดง ${NotiStore.QUERY_LIMIT} รายการล่าสุดที่ตรงกัน — อาจมีรายการเก่ากว่านี้ที่ไม่แสดง " +
+                        "ลองค้นหาให้เจาะจงขึ้นเพื่อหาของเก่ากว่านี้",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(filteredItems) { item -> NotiRow(item) }
             }

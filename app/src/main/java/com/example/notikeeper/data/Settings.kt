@@ -89,6 +89,22 @@ object Settings {
         return allow.isEmpty() || pkg in allow
     }
 
+    /**
+     * Last time each capture service confirmed it was actually alive — updated
+     * on every successful insert, and compared against "now" whenever the
+     * service (re)connects, so a blind window (permission revoked, OEM battery
+     * killer, crash, reboot — anything that stops capture without the app ever
+     * hearing about it) gets a visible record instead of just reading as
+     * silence indistinguishable from nothing happening. See G-28/G-29 in the
+     * capture-to-archive integrity audit; [NotiStore.GAP_THRESHOLD_MS] is the
+     * "worth recording" cutoff.
+     */
+    fun getLastNotiHeartbeat(c: Context): Long = SecureStore.getLong(c, "last_noti_heartbeat", 0L)
+    fun setLastNotiHeartbeat(c: Context, v: Long) = SecureStore.putLong(c, "last_noti_heartbeat", v)
+
+    fun getLastScreenHeartbeat(c: Context): Long = SecureStore.getLong(c, "last_screen_heartbeat", 0L)
+    fun setLastScreenHeartbeat(c: Context, v: Long) = SecureStore.putLong(c, "last_screen_heartbeat", v)
+
     // In-app updater: URL of the version.json to check.
     // Defaults to NotiKeeper's GitHub Releases "latest/download" stable URL so a fresh
     // install can auto-check for updates without the user pasting anything.

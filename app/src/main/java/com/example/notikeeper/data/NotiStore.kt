@@ -51,6 +51,16 @@ data class NotiItem(
 private const val ITEM_COLUMNS =
     "id,source,pkg,appName,title,text,side,postTime,timeExact,capturedAt,extractionVersion"
 
+/**
+ * Minimum blind-window length worth recording as a capture gap (see
+ * [NotiStore.insertGap], G-28/G-29). Below this, an ordinary app restart or a
+ * few-second rebind after boot would generate a gap row on every single
+ * cold start — noise, not signal. Above it, something actually stopped
+ * capture for a meaningful stretch: a permission revoked, an OEM battery
+ * killer, a crash that took a while to recover from.
+ */
+private const val GAP_THRESHOLD_MS = 15L * 60_000L
+
 /** A single line read off the Messenger screen by the AccessibilityService. */
 data class ScreenRow(
     val pkg: String,
@@ -234,6 +244,61 @@ class NotiStore private constructor(
         }
     }
 
+    /**
+     * Called by a capture service whenever it (re)connects — [lastHeartbeat] is
+     * the timestamp it last confirmed a successful capture (0 if never). If the
+     * gap since then is long enough to count as real (not just an ordinary
+     * restart's few-second rebind — see [GAP_THRESHOLD_MS]), records it as a
+     * row so a blind window becomes a visible fact in the archive instead of
+     * indistinguishable silence — see G-28/G-29 in the capture-to-archive
+     * integrity audit. Returns "now", which the caller should persist as the
+     * new heartbeat baseline regardless of whether a gap was recorded.
+     */
+    fun recordGapIfAny(service: String, lastHeartbeat: Long): Long {
+        val now = System.currentTimeMillis()
+        // lastHeartbeat == 0 means "never recorded one yet" (fresh install, or a
+        // service that has literally never captured anything) — not a real gap
+        // since epoch, so nothing to report.
+        if (lastHeartbeat > 0 && now - lastHeartbeat >= GAP_THRESHOLD_MS) {
+            insertGap(service, lastHeartbeat, now)
+        }
+        return now
+    }
+
+    /**
+     * A real row, source="gap", so it flows through search/export/upload
+     * exactly like any other row with zero extra plumbing. The server side
+     * (relations.mjs) excludes source="gap" rows from the relational/graph
+     * ETL the same way it already excludes known system-app noise — a gap
+     * marker isn't a conversation and shouldn't pollute thread views — while
+     * staying durably recorded in the raw archive (data.jsonl) either way.
+     */
+    private fun insertGap(service: String, gapStartMs: Long, gapEndMs: Long) {
+        val fmt = java.text.SimpleDateFormat("dd/MM/yy HH:mm", java.util.Locale.getDefault())
+        val durationMin = (gapEndMs - gapStartMs) / 60_000
+        val values = ContentValues().apply {
+            put("source", "gap")
+            put("pkg", "notikeeper.internal.gap")
+            put("appName", "NotiKeeper")
+            put("title", "Capture gap: $service")
+            put(
+                "text",
+                "$service capture was not confirmed running from " +
+                    "${fmt.format(java.util.Date(gapStartMs))} to " +
+                    "${fmt.format(java.util.Date(gapEndMs))} (~${durationMin}m)"
+            )
+            put("side", "")
+            put("postTime", gapEndMs)
+            // gapEndMs is exactly when reconnection was detected — genuinely exact,
+            // unlike a screen row's capture-tick approximation.
+            put("timeExact", 1)
+            put("capturedAt", gapEndMs)
+            put("extractionVersion", BuildConfig.VERSION_CODE)
+            put("dedupKey", "gap:$service:$gapStartMs:$gapEndMs")
+        }
+        database.insertWithOnConflict("notifications", null, values, SQLiteDatabase.CONFLICT_IGNORE)
+    }
+
     private fun cursorToNotiItem(c: android.database.Cursor): NotiItem = NotiItem(
         id = c.getLong(0),
         source = c.getString(1),
@@ -248,13 +313,17 @@ class NotiStore private constructor(
         extractionVersion = if (c.isNull(10)) null else c.getInt(10)
     )
 
-    /** Empty search = newest first. Otherwise match app/contact name, sender, or message. */
+    /**
+     * Empty search = newest first. Otherwise match app/contact name, sender, or
+     * message. Capped at [QUERY_LIMIT] — see the constant's own doc comment for
+     * why the caller needs to know that number, not just this function.
+     */
     fun query(search: String): List<NotiItem> {
         val db = database
         val cursor = if (search.isBlank()) {
             db.rawQuery(
                 "SELECT $ITEM_COLUMNS FROM notifications " +
-                    "ORDER BY postTime DESC, id DESC LIMIT 5000",
+                    "ORDER BY postTime DESC, id DESC LIMIT $QUERY_LIMIT",
                 null
             )
         } else {
@@ -262,7 +331,7 @@ class NotiStore private constructor(
             db.rawQuery(
                 "SELECT $ITEM_COLUMNS FROM notifications " +
                     "WHERE appName LIKE ? OR title LIKE ? OR text LIKE ? " +
-                    "ORDER BY postTime DESC, id DESC LIMIT 5000",
+                    "ORDER BY postTime DESC, id DESC LIMIT $QUERY_LIMIT",
                 arrayOf(like, like, like)
             )
         }
@@ -479,6 +548,19 @@ class NotiStore private constructor(
     }
 
     companion object {
+        /**
+         * The row cap on [query] (and the newest-first-with-no-search case).
+         * Public so a caller can tell when a result set was actually truncated
+         * (`items.size == QUERY_LIMIT`) rather than showing "unlimited search"
+         * when it silently isn't — see G-18 in the capture-to-archive
+         * integrity audit. Not exact: a search that happens to match exactly
+         * this many rows, no more, reads identically to one that was capped.
+         * That's a deliberate trade — a rare false "might be more" notice is a
+         * far safer failure than the alternative, which was never saying
+         * anything at all.
+         */
+        const val QUERY_LIMIT = 5000
+
         @Volatile
         private var instance: NotiStore? = null
 

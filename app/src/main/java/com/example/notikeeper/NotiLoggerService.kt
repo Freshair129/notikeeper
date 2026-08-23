@@ -21,6 +21,28 @@ class NotiLoggerService : NotificationListenerService() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Fires whenever the system (re)binds this listener — first launch, after
+     * the user re-grants notification access, after an OEM battery killer or
+     * a crash releases it, after reboot. Compares against the last time we
+     * actually captured something and records a gap row if the silence was
+     * long enough to be a real blind window rather than an ordinary rebind —
+     * see G-28/G-29 in the capture-to-archive integrity audit. There is no
+     * reliable "I am about to be disconnected" callback to hook instead (a
+     * kill or a permission revocation doesn't guarantee onListenerDisconnected
+     * fires before the process dies), so detecting retroactively at
+     * reconnection is the one approach that's robust to every failure mode.
+     */
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        scope.launch {
+            val ctx = applicationContext
+            val last = com.example.notikeeper.data.Settings.getLastNotiHeartbeat(ctx)
+            val now = NotiStore.get(ctx).recordGapIfAny("noti", last)
+            com.example.notikeeper.data.Settings.setLastNotiHeartbeat(ctx, now)
+        }
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         sbn ?: return
         val notification = sbn.notification ?: return
@@ -52,7 +74,11 @@ class NotiLoggerService : NotificationListenerService() {
 
         val postTime = sbn.postTime
         scope.launch {
-            NotiStore.get(applicationContext).insertNoti(pkg, appName, title, text, postTime)
+            val ctx = applicationContext
+            NotiStore.get(ctx).insertNoti(pkg, appName, title, text, postTime)
+            // Proof of life for the gap check in onListenerConnected — a capture
+            // that actually ran, not just the service being bound.
+            com.example.notikeeper.data.Settings.setLastNotiHeartbeat(ctx, System.currentTimeMillis())
         }
 
         // Eyes-free driving mode: read the alert aloud (only for whitelisted apps).

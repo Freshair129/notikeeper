@@ -293,6 +293,10 @@ function parseRow(r) {
   // Skip system app noise outright — these never carry real messages.
   if (["Meta App Manager", "Galaxy Store", "Samsung capture",
        "Dashboard Test", "HealthCheck"].includes(app)) return null;
+  // A capture-gap marker (see NotiStore.kt's insertGap, G-28/G-29) isn't a
+  // conversation and shouldn't create a thread/user of its own — it stays in
+  // the raw archive (data.jsonl) and the phone's own local Feed, just not here.
+  if (source === "gap") return null;
 
   // LLM quality-gate (Phase 4): for the short 1–2 word fragments the cheap
   // heuristic can't settle, a cached Chinda verdict overrides it. `false` =

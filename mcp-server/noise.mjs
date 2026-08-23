@@ -40,6 +40,11 @@ export function classifyNoise(r) {
   const title = (r.title || "").trim();
   const text = (r.text || "").trim();
 
+  // A capture-gap marker (see NotiStore.kt's insertGap, G-28/G-29) is real,
+  // durably-recorded provenance about the archive itself — but it's not a
+  // message either, so the dashboard's default (denoise-on) message view
+  // shouldn't mix it in with actual conversation.
+  if (r.source === "gap") return "capture-gap";
   if (NOISE_APPS.has(app)) return "system-app";
   if (NOISE_PKG_PREFIX.some((p) => pkg.startsWith(p))) return "system-pkg";
   if (!text && !title) return "empty";

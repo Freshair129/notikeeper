@@ -11,6 +11,7 @@ test("classifyNoise preserves the existing row keep/drop boundary", () => {
     { name: "URL", row: { source: "noti", text: "https://example.test/sticker" }, tag: "sticker-url" },
     { name: "promo notification", row: { source: "noti", text: "Sale today" }, tag: "promo" },
     { name: "Messenger chrome text", row: { source: "screen", text: "Active now" }, tag: null },
+    { name: "capture gap marker", row: { source: "gap", text: "noti capture was not confirmed running..." }, tag: "capture-gap" },
   ];
 
   for (const { name, row, tag } of fixtures) {
