@@ -265,6 +265,34 @@ function isJunkMsg(text) {
   return false;
 }
 
+// Filter for noti source: notifications ARE real messages — skip the single-word short-length
+// heuristic entirely ("เลอะเทอะ", "เงี่ยน", "ซี" etc. are valid short chat replies).
+function isJunkMsgNoti(text) {
+  if (!text) return true;
+  const t = text.trim();
+  if (!t || t.length < 1) return true;
+  if (CHROME_EXACT.has(t)) return true;
+  for (const re of CHROME_MSG_RE) if (re.test(t)) return true;
+  return false;
+}
+
+// More lenient filter for owner's own outgoing messages (side=me from screen source).
+// We skip the short single-word heuristic because real chat replies can be very short.
+function isJunkMsgOwner(text) {
+  if (!text) return true;
+  const t = text.trim();
+  if (!t || t.length < 2) return true;
+  if (CHROME_EXACT.has(t)) return true;
+  for (const re of CHROME_MSG_RE) if (re.test(t)) return true;
+  // Still reject bare UI strings like timestamps / active status
+  if (/^[\d:]+$/.test(t)) return true;            // "16:02", "3"
+  if (/^‎/.test(t)) return true;                  // accessibility invisible prefix
+  if (/ใช้งานเมื่อ/.test(t)) return true;         // "ใช้งานเมื่อ 3 ชั่วโมงที่แล้ว"
+  if (/เห็นเมื่อ/.test(t)) return true;
+  if (/Sent just now/.test(t)) return true;
+  return false;
+}
+
 // ── Deduplication ─────────────────────────────────────────────────────────────
 // Priority: scrape(1) > noti(2) > screen(3). scrape wins when same text within 3 min.
 // noti messages have side="" (incoming-only) — normalise to "them" for matching.
@@ -375,9 +403,37 @@ function main() {
   for (const { app, title, msgs } of byThread.values()) {
     if (isBadTitle(title)) { totalDropped += msgs.length; continue; }
 
-    // Filter message content (skip screen source by default — too noisy)
+    // Detect bulk screen dumps: if the same timestamp has ≥5 screen+side=me records,
+    // it's an inbox list snapshot (contact names visible on screen), not sent messages.
+    const bulkDumpTimes = new Set();
+    const screenMeByTime = new Map();
+    for (const m of msgs) {
+      if (m.source === "screen" && m.side === "me") {
+        if (!screenMeByTime.has(m.time)) screenMeByTime.set(m.time, 0);
+        screenMeByTime.set(m.time, screenMeByTime.get(m.time) + 1);
+      }
+    }
+    for (const [t, count] of screenMeByTime) {
+      if (count >= 5) bulkDumpTimes.add(t);
+    }
+
+    // Filter message content:
+    // - noti/scrape sources: always include (incoming messages)
+    // - screen source with side="me": include as owner's sent messages,
+    //   BUT skip if the timestamp is a bulk inbox-list dump
+    // - screen source with side!="me": skip (too noisy — UI chrome, list items, etc.)
     const clean = msgs
-      .filter(m => (INCLUDE_SCREEN || m.source !== "screen") && !isJunkMsg(m.text))
+      .filter(m => {
+        if (m.source === "noti") return !isJunkMsgNoti(m.text); // noti = real incoming msg, lenient
+        if (m.source !== "screen") return !isJunkMsg(m.text); // scrape: standard filter
+        if (INCLUDE_SCREEN) return !isJunkMsg(m.text);        // --include-screen flag
+        // screen + side=me: owner's outgoing message
+        if (m.side === "me" && m.title === title) {
+          if (bulkDumpTimes.has(m.time)) return false; // inbox list dump — skip
+          if (!isJunkMsgOwner(m.text)) return true;
+        }
+        return false; // screen + side=them: skip (noisy UI)
+      })
       .sort((a, b) => a.time - b.time);
 
     const deduped = dedup(clean);
