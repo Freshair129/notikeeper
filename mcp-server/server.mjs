@@ -331,8 +331,20 @@ function dedupCleanup() {
   }
   if (toRemove.size === 0) return { removed: 0, groups: 0 };
 
-  const removedRows = rows.filter((r) => toRemove.has(keyOf(r)));
-  const keptRows = rows.filter((r) => !toRemove.has(keyOf(r)));
+  // One pass building both arrays, not two separate .filter() calls over the
+  // same (potentially large) rows array — see G-19 in the capture-to-archive
+  // integrity audit ("dedup builds three more full copies"). This addresses
+  // that specific sub-claim only; the bigger one (the whole store lives
+  // resident in `rows`/`seen` at all, not queried from relations.db) is a
+  // real architecture change to a server this session's user runs
+  // persistently, deliberately left for its own dedicated pass rather than
+  // attempted alongside everything else this wave touched — see the commit
+  // message.
+  const removedRows = [];
+  const keptRows = [];
+  for (const r of rows) {
+    (toRemove.has(keyOf(r)) ? removedRows : keptRows).push(r);
+  }
 
   // Archive BEFORE touching the active store — the log is the undo path.
   const archiveLines = removedRows
