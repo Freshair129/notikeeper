@@ -62,4 +62,11 @@ dependencies {
 
     // QR scanner (camera-based pairing)
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // Local (JVM, no device) unit tests — see app/src/test and G-33 in the
+    // capture-to-archive integrity audit. Deliberately just JUnit4, no
+    // Robolectric/Mockito: everything under test here (dedup key builders,
+    // CSV/JSON export, pure math helpers) was written or refactored to not
+    // touch the Android framework, so a device/emulator stub isn't needed.
+    testImplementation("junit:junit:4.13.2")
 }

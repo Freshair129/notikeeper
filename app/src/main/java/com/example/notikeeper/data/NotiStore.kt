@@ -72,6 +72,25 @@ data class ScreenRow(
 )
 
 /**
+ * Pulled out of [NotiStore.insertNoti] as a pure function so it's unit-testable
+ * without a device (SQLiteOpenHelper/SQLCipher can't run in a local JVM test) —
+ * see G-33 in the capture-to-archive integrity audit. Behavior is unchanged;
+ * see insertNoti's own comment for why the bucket is 5 minutes, not exact time
+ * or content alone.
+ */
+internal fun notiDedupKey(pkg: String, title: String, text: String, postTime: Long): String {
+    val bucket = postTime / (5 * 60 * 1000)
+    return "noti:$pkg:$title:$text:$bucket"
+}
+
+/** Same reasoning as [notiDedupKey] — extracted from [NotiStore.insertScreenBatch]. */
+internal fun screenDedupKey(row: ScreenRow): String = "screen:${row.sender}:${row.side}:${row.text}"
+
+/** Same reasoning as [notiDedupKey] — extracted from [NotiStore.insertGap]. */
+internal fun gapDedupKey(service: String, gapStartMs: Long, gapEndMs: Long): String =
+    "gap:$service:$gapStartMs:$gapEndMs"
+
+/**
  * Encrypted SQLite store (SQLCipher / AES-256). The whole `noti.db` file is
  * unreadable without the passphrase from [DbKey]. Otherwise behaves like the
  * plain version: singleton, idempotent inserts via a UNIQUE dedupKey.
@@ -239,8 +258,7 @@ class NotiStore private constructor(
             // noise classifier already flags as not a meaningful message, so it can
             // collapse a real spam blast across its whole history without this key
             // having to do that job by discarding real content on the phone.
-            val bucket = postTime / (5 * 60 * 1000)
-            put("dedupKey", "noti:$pkg:$title:$text:$bucket")
+            put("dedupKey", notiDedupKey(pkg, title, text, postTime))
         }
         val rowId = database.insertWithOnConflict(
             "notifications", null, values, SQLiteDatabase.CONFLICT_IGNORE
@@ -270,7 +288,7 @@ class NotiStore private constructor(
                     // two are the same wall-clock moment for this source.
                     put("capturedAt", r.postTime)
                     put("extractionVersion", BuildConfig.VERSION_CODE)
-                    put("dedupKey", "screen:${r.sender}:${r.side}:${r.text}")
+                    put("dedupKey", screenDedupKey(r))
                 }
                 db.insertWithOnConflict(
                     "notifications", null, values, SQLiteDatabase.CONFLICT_IGNORE
@@ -332,7 +350,7 @@ class NotiStore private constructor(
             put("timeExact", 1)
             put("capturedAt", gapEndMs)
             put("extractionVersion", BuildConfig.VERSION_CODE)
-            put("dedupKey", "gap:$service:$gapStartMs:$gapEndMs")
+            put("dedupKey", gapDedupKey(service, gapStartMs, gapEndMs))
         }
         database.insertWithOnConflict("notifications", null, values, SQLiteDatabase.CONFLICT_IGNORE)
     }
