@@ -2,15 +2,16 @@
   "id": "DOC-0001",
   "points_to": "ARCHITECTURE.md",
   "type": "doc",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "status": "draft",
   "superseded_by": null,
-  "sha256": "8f8c2e0cd911620adf19b86ac71a4f6b8fd52cf58a17a468668dbe8a77b88735",
+  "sha256": "7b912cf3f81a78b774a28d1acebc1b7ee7581668dd825619c46991af3dfcb54c",
   "relations": { "depends_on": [], "referenced_by": [] },
   "attributes": { "doc_type": "spec", "domain": "architecture" },
   "created_at": "2026-07-09T10:10:00+07:00",
-  "updated_at": "2026-07-09T10:10:00+07:00",
+  "updated_at": "2026-08-23T10:56:02+07:00",
   "changelog": [
-    { "version": "0.1.0", "date": "2026-07-09T10:10:00+07:00", "kind": "register", "change": "initial registration (RWANG:QuickStart bootstrap)", "ref": null, "agent": "claude-code", "commit": null }
+    { "version": "0.1.0", "date": "2026-07-09T10:10:00+07:00", "kind": "register", "change": "initial registration (RWANG:QuickStart bootstrap)", "ref": null, "agent": "claude-code", "commit": null },
+    { "version": "0.1.1", "date": "2026-08-23T10:56:02+07:00", "kind": "patch", "change": "corrected the key-storage description (same fix as SECURITY.md), the dedupe key format (now pkg + a 5-minute time bucket, not the old exact-time key), and the upload/prune description (server-confirmed ackedThroughId gates pruning, not the local send-attempt pointer) to match shipped code, per G-32 in the capture-to-archive integrity audit", "ref": null, "agent": "claude-code", "commit": null }
   ]
 }

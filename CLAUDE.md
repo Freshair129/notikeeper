@@ -9,7 +9,7 @@ behind a biometric lock, and can export/upload/read aloud. Companion Node MCP
 server lets Claude search the archive. **Personal-use tool** for the device
 owner's own data — not a Play-Store product.
 
-**Current: v1.12** (versionCode 13). Published at
+**Current: v1.2.0** (versionCode 17). Published at
 `Freshair129/notikeeper` (public). Landing: https://notikeeper.vercel.app
 
 Three moving parts:

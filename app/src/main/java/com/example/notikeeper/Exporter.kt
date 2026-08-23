@@ -81,13 +81,19 @@ object Exporter {
 
     /** Streams [rows] to [writer] as CSV, one line at a time. Returns the row count. */
     fun writeCsvRows(writer: Writer, rows: Sequence<NotiItem>): Int {
-        writer.write("id,source,app,title,text,side,time,time_exact,captured_at,extraction_version\n")
+        // pkg is in the JSON export (rowToJson) and in the iOS companion's own CSV
+        // writer (MessageStore.swift) but was missing here — the one field that
+        // actually distinguishes same-named apps/threads across packages, and
+        // without it a round-trip through this CSV can't reconstruct pkg at all.
+        // See G-23 in the capture-to-archive integrity audit.
+        writer.write("id,source,app,pkg,title,text,side,time,time_exact,captured_at,extraction_version\n")
         var count = 0
         for (it in rows) {
             writer.write(it.id.toString())
             writer.write(",")
             writer.write(csv(it.source)); writer.write(",")
             writer.write(csv(it.appName)); writer.write(",")
+            writer.write(csv(it.pkg)); writer.write(",")
             writer.write(csv(it.title)); writer.write(",")
             writer.write(csv(it.text)); writer.write(",")
             writer.write(csv(it.side)); writer.write(",")
