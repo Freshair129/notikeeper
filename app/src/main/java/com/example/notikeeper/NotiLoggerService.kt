@@ -48,18 +48,6 @@ class NotiLoggerService : NotificationListenerService() {
         val notification = sbn.notification ?: return
         val extras = notification.extras ?: return
 
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
-
-        // Prefer the fullest body we can get: big text > grouped lines > short text.
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
-        val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-        val text = when {
-            !bigText.isNullOrBlank() -> bigText
-            !lines.isNullOrEmpty() -> lines.joinToString("\n") { it.toString() }
-            else -> extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
-        }
-
-        if (title.isBlank() && text.isBlank()) return
         // Skip persistent/ongoing notifications (music player, downloads, "running" icons).
         if (notification.flags and Notification.FLAG_ONGOING_EVENT != 0) return
 
@@ -71,6 +59,71 @@ class NotiLoggerService : NotificationListenerService() {
             val pm = packageManager
             pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
         }.getOrDefault(pkg)
+
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString().orEmpty()
+
+        // Prefer NotificationCompat.MessagingStyle when the app used it: it carries
+        // the real per-message sender (Person) and a real send timestamp
+        // (Message.getTimestamp()), not just this notification's post time and one
+        // flattened body — see G-37 in the capture-to-archive integrity audit. Each
+        // update of a MessagingStyle notification re-hands the WHOLE conversation
+        // history in getMessages(), not just the new message; that's fine here
+        // because insertNoti's existing dedupKey (pkg+title+text+5min-bucket of the
+        // real, stable per-message timestamp) already ignores rows it's seen
+        // before, so re-processing history on every update can't duplicate rows —
+        // it just gives every past message a chance to be captured, including ones
+        // whose notification arrived before this code existed.
+        val messagingMessages = runCatching {
+            androidx.core.app.NotificationCompat.MessagingStyle
+                .extractMessagingStyleFromNotification(notification)?.messages
+        }.getOrNull()
+
+        if (!messagingMessages.isNullOrEmpty()) {
+            scope.launch {
+                val ctx = applicationContext
+                val store = NotiStore.get(ctx)
+                val freshlySpoken = ArrayList<String>()
+                for (msg in messagingMessages) {
+                    val msgText = msg.text?.toString()?.trim().orEmpty()
+                    if (msgText.isBlank()) continue
+                    // Reuses relations.mjs's existing "Sender: text" prefix convention
+                    // (SENDER_PREFIX_RE) so the server-side sender extraction that
+                    // already runs on noti-source text picks this up with zero
+                    // server changes.
+                    val senderName = msg.person?.name?.toString()?.trim()
+                    val rowText = if (!senderName.isNullOrBlank()) "$senderName: $msgText" else msgText
+                    val isNew = store.insertNoti(pkg, appName, title, rowText, msg.timestamp)
+                    if (isNew) freshlySpoken.add(rowText)
+                }
+                // Proof of life for the gap check in onListenerConnected — a capture
+                // that actually ran, not just the service being bound.
+                com.example.notikeeper.data.Settings.setLastNotiHeartbeat(ctx, System.currentTimeMillis())
+
+                if (freshlySpoken.isNotEmpty() &&
+                    com.example.notikeeper.data.Settings.getReadAloudNoti(ctx) &&
+                    com.example.notikeeper.data.Settings.shouldSpeak(ctx, pkg)
+                ) {
+                    val spoken = buildString {
+                        if (title.isNotBlank()) append(title).append(". ")
+                        append(freshlySpoken.joinToString(". "))
+                    }
+                    Speaker.speak(ctx, spoken)
+                }
+            }
+            return
+        }
+
+        // Fallback: no MessagingStyle (most apps) — one row from title + the
+        // fullest body we can get: big text > grouped lines > short text.
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
+        val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+        val text = when {
+            !bigText.isNullOrBlank() -> bigText
+            !lines.isNullOrEmpty() -> lines.joinToString("\n") { it.toString() }
+            else -> extras.getCharSequence(Notification.EXTRA_TEXT)?.toString().orEmpty()
+        }
+
+        if (title.isBlank() && text.isBlank()) return
 
         val postTime = sbn.postTime
         scope.launch {

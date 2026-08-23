@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
@@ -431,6 +432,11 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
     var status by remember { mutableStateOf("") }
     var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
     val captureApps = remember { Settings.getCaptureApps(ctx) }
+    // A QR payload can silently redirect where future app updates are fetched
+    // from — see G-17 in the capture-to-archive integrity audit. Everything
+    // else a QR sets (endpoint, token, capture filter) is applied immediately,
+    // same as before; only a NEW updateUrl waits here for an explicit tap.
+    var pendingUpdateUrl by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         apps = withContext(Dispatchers.IO) { InstalledApps.scan(ctx, NotiStore.get(ctx).distinctApps()) }
@@ -461,8 +467,13 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
             apiUrl = endpoint!!
             Settings.setApiUrl(ctx, endpoint!!)
             if (token != null) { apiToken = token!!; Settings.setApiToken(ctx, token!!) }
-            if (update != null) { Settings.setUpdateUrl(ctx, update!!) }
             capturePkgs?.let { Settings.setCaptureApps(ctx, it) }
+            // Only hold updateUrl back for confirmation when the QR is actually
+            // proposing to CHANGE it — re-pairing with the same PC over and over
+            // shouldn't nag every time.
+            if (update != null && update != Settings.getUpdateUrl(ctx)) {
+                pendingUpdateUrl = update
+            }
             status = "ตั้งค่าเสร็จ — endpoint: $endpoint" +
                 (capturePkgs?.let { " · ตัวกรองการบันทึก ${it.size} แอปจาก PC" } ?: "")
             Toast.makeText(ctx, "Pair สำเร็จ", Toast.LENGTH_SHORT).show()
@@ -479,6 +490,27 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
             )
         }
     ) { padding ->
+        pendingUpdateUrl?.let { proposedUrl ->
+            AlertDialog(
+                onDismissRequest = { pendingUpdateUrl = null },
+                title = { Text("เปลี่ยนแหล่งอัปเดตแอป?") },
+                text = {
+                    Text(
+                        "QR นี้ต้องการเปลี่ยน URL ที่แอปใช้ตรวจ/โหลดอัปเดตในอนาคต เป็น:\n\n$proposedUrl\n\n" +
+                            "ยืนยันเฉพาะถ้าคุณเชื่อถือแหล่งนี้ — การอัปเดตครั้งถัดไปจะโหลดจากที่นี่"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        Settings.setUpdateUrl(ctx, proposedUrl)
+                        pendingUpdateUrl = null
+                    }) { Text("ยืนยันเปลี่ยน") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingUpdateUrl = null }) { Text("ไม่เปลี่ยน") }
+                }
+            )
+        }
         Column(
             modifier = Modifier
                 .padding(padding)
@@ -697,7 +729,7 @@ private fun AboutUpdateScreen(onClose: () -> Unit) {
                                 updateStatus = "เป็นเวอร์ชันล่าสุดแล้ว (${BuildConfig.VERSION_NAME})"
                             } else {
                                 updateStatus = "พบเวอร์ชัน ${info.versionName} — กำลังดาวน์โหลด..."
-                                val f = Updater.download(ctx, info.apkUrl)
+                                val f = Updater.download(ctx, info.apkUrl, info.sha256)
                                 updateStatus = "กำลังเปิดตัวติดตั้ง..."
                                 Updater.install(ctx, f)
                             }

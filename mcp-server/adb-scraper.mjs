@@ -27,7 +27,6 @@ import { DEFAULT_INGEST_URL, INGEST_TOKEN } from "./config.mjs";
 const INGEST_URL   = process.env.INGEST_URL || DEFAULT_INGEST_URL;
 const PKG          = "com.facebook.orca";
 const APP_NAME     = "Messenger";
-const SCREEN_W     = 720;   // Samsung A07 (SM-A075F)
 
 // How many consecutive scrolls with zero new messages before we stop.
 const IDLE_SCROLL_LIMIT = 4;
@@ -90,6 +89,40 @@ function adbDump() {
   return adb("uiautomator dump /sdcard/nk_dump.xml >/dev/null 2>&1 && cat /sdcard/nk_dump.xml", {
     timeout: 18000,
   });
+}
+
+/**
+ * Real device screen width, queried once via `adb shell wm size` instead of
+ * hardcoded to one specific handset (was: Samsung A07 / SM-A075F) — see G-15
+ * in the capture-to-archive integrity audit. Falls back to that same value
+ * only if the query fails or its output doesn't parse, so a hiccup degrades
+ * to the old behavior rather than crashing the scraper outright.
+ */
+function resolveScreenWidth() {
+  try {
+    const out = adb("wm size", { optional: true });
+    // Prefer "Override size" (an actively applied custom resolution) over
+    // "Physical size" when both are present.
+    const m = /Override size:\s*(\d+)x(\d+)/.exec(out) || /Physical size:\s*(\d+)x(\d+)/.exec(out);
+    if (m) return parseInt(m[1], 10);
+  } catch { /* fall through to the default below */ }
+  return 720;
+}
+const SCREEN_W = resolveScreenWidth();
+
+/**
+ * Same design as MessengerReaderService.kt's sideOf on the phone (see G-15 in
+ * the capture-to-archive integrity audit): a bubble too close to center to
+ * call confidently returns "" (unknown) instead of a forced guess. No RTL
+ * handling here — unlike the on-device service, this scraper has no reliable
+ * signal for the phone's layout direction from a raw uiautomator XML dump
+ * alone, so that half of G-15 is scoped to the on-device path only.
+ */
+function sideOf(cx, screenW) {
+  const fraction = cx / screenW;
+  if (fraction > 0.60) return "me";
+  if (fraction < 0.50) return "them";
+  return "";
 }
 
 
@@ -358,7 +391,7 @@ function extractMessages(xml, currentTimeMs) {
     if (DOUBLE_TAP_RE.test(raw)) {
       const text = cleanMsgDesc(raw);
       if (!text || text.length < 1 || isChrome(text)) continue;
-      const side = n.cx > SCREEN_W * 0.55 ? "me" : "them";
+      const side = sideOf(n.cx, SCREEN_W);
       msgEvents.push({ text, side, cy: n.cy });
     }
   }

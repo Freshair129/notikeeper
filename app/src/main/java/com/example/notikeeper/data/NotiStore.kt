@@ -170,8 +170,17 @@ class NotiStore private constructor(
         }
     }
 
-    /** Insert one captured notification (background, app-wide). */
-    fun insertNoti(pkg: String, appName: String, title: String, text: String, postTime: Long) {
+    /**
+     * Insert one captured notification (background, app-wide).
+     *
+     * Returns true if this row was actually new (survived the dedupKey conflict
+     * check), false if it was ignored as a duplicate. Callers that fan a single
+     * notification out into several rows — see NotiLoggerService's MessagingStyle
+     * extraction (G-37) — need this to tell a genuinely new message apart from a
+     * historical one MessagingStyle re-hands them on every update, without
+     * re-triggering things like read-aloud for messages already spoken.
+     */
+    fun insertNoti(pkg: String, appName: String, title: String, text: String, postTime: Long): Boolean {
         val values = ContentValues().apply {
             put("source", "noti")
             put("pkg", pkg)
@@ -205,9 +214,10 @@ class NotiStore private constructor(
             val bucket = postTime / (5 * 60 * 1000)
             put("dedupKey", "noti:$pkg:$title:$text:$bucket")
         }
-        database.insertWithOnConflict(
+        val rowId = database.insertWithOnConflict(
             "notifications", null, values, SQLiteDatabase.CONFLICT_IGNORE
         )
+        return rowId != -1L
     }
 
     /** Insert a batch of lines read off the screen, in one transaction. */
