@@ -23,6 +23,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import QRCode from "qrcode";
 import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages, linkThreadAlias } from "./relations.mjs";
+import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows } from "./raw-store.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
@@ -209,6 +210,10 @@ function ingest(arr) {
       const n = Number(r.id);
       if (!Number.isNaN(n) && (ackThroughId === null || n > ackThroughId)) ackThroughId = n;
     }
+    // Keep the raw.db mirror in lock-step with `rows`/`seen` (see G-19,
+    // raw-store.mjs) — same "don't let a fold failure block the response
+    // that's already durably true" reasoning as the relations.db fold below.
+    try { insertRawRows(RAWDB, candidates, keyOf); } catch (e) { console.error("[raw-store] mirror failed:", e.message); }
     // incrementally fold the new rows into the relational DB
     try { reindex(RDB, candidates); } catch (e) { console.error("[relations] fold failed:", e.message); }
     broadcast("new", { count: candidates.length, total: rows.length, sample: candidates.slice(-3) });
@@ -219,6 +224,24 @@ function ingest(arr) {
 
 load();
 console.error(`[notikeeper-mcp] loaded ${rows.length} rows from ${DATA_FILE}`);
+
+// SQLite mirror of the raw archive — see raw-store.mjs's own doc comment and
+// G-19 in the capture-to-archive integrity audit. Step 1 only: this is
+// populated alongside `rows`/`seen`, not read from anywhere yet, so a bug
+// here cannot change anything currently observable. insertRawRows is
+// idempotent (INSERT OR IGNORE keyed on the same raw_key `seen` uses), so
+// this also naturally catches raw.db up if it's ever behind — a fresh
+// database, an interrupted previous run, or a manually deleted file are all
+// the same case: nothing there yet gets backfilled, everything already
+// there is a no-op.
+const RAWDB = openRawDb(path.join(__dirname, "raw.db"));
+insertRawRows(RAWDB, rows, keyOf);
+{
+  const mirrored = countRawRows(RAWDB);
+  const log = mirrored === rows.length ? console.error : console.warn;
+  log(`[notikeeper-mcp] raw.db mirror: ${mirrored}/${rows.length} rows` +
+    (mirrored === rows.length ? "" : " — MISMATCH, investigate before relying on this store"));
+}
 
 // Relational DB — derived view over data.jsonl
 const RDB = openDb(path.join(__dirname, "relations.db"));
@@ -370,6 +393,15 @@ function dedupCleanup() {
   for (const r of keptRows) rows.push(r);
   seen.clear();
   for (const r of rows) seen.add(keyOf(r));
+
+  // Keep raw.db's mirror consistent with the file write above — same
+  // reasoning as the incremental insert in ingest(). Uses server.mjs's own
+  // keyOf (raw_key), not relations.db's "source|id|time" format below —
+  // the two stores index the same rows under different, unrelated keys.
+  try {
+    const n = deleteRawRows(RAWDB, removedRows.map(keyOf));
+    console.error(`[dedup] raw.db: deleted ${n} rows`);
+  } catch (e) { console.error("[dedup] raw.db cleanup failed:", e.message); }
 
   // Purge the same rows from relations.db (Threads/Graph tabs, MCP tools) so
   // they don't keep showing duplicates reindex() would otherwise never remove.

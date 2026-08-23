@@ -25,6 +25,9 @@ mcp-server/relations.db-wal
 mcp-server/relations.db.*
 mcp-server/relations.db-shm.*
 mcp-server/relations.db-wal.*
+mcp-server/raw.db
+mcp-server/raw.db-shm
+mcp-server/raw.db-wal
 mcp-server/graph.db/
 mcp-server/graph.db
 mcp-server/graph.db-shm
