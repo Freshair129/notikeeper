@@ -22,7 +22,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import QRCode from "qrcode";
-import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages } from "./relations.mjs";
+import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages, linkThreadAlias } from "./relations.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
@@ -1293,6 +1293,44 @@ mcp.tool(
       return `[${time}] ${m.source} ${who}: ${m.text}`;
     });
     return { content: [{ type: "text", text: head + "\n" + lines.join("\n") }] };
+  }
+);
+
+mcp.tool(
+  "link_thread_alias",
+  {
+    canonicalThreadId: z.number().describe(
+      "Thread id to keep as the conversation's current identity — its history " +
+      "will include the alias thread's messages too."
+    ),
+    aliasThreadId: z.number().describe(
+      "Older thread id being folded in — e.g. the conversation's name before a rename."
+    ),
+    reason: z.string().optional().describe(
+      "Why these are the same conversation, e.g. \"renamed 'Family' -> 'Family 2024'\""
+    ),
+  },
+  // See G-13 in the capture-to-archive integrity audit: a renamed
+  // conversation starts a brand-new thread row with no automatic link back
+  // to its history under the old name, and nothing in the capture pipeline
+  // carries a stable app-internal conversation id that would let a rename be
+  // told apart from "coincidentally the same name, actually a different
+  // conversation" by inference — so this is never inferred automatically,
+  // only recorded when asked. Use thread_summary/list_apps or hql first to
+  // find both thread ids.
+  async ({ canonicalThreadId, aliasThreadId, reason }) => {
+    try {
+      const result = linkThreadAlias(RDB, canonicalThreadId, aliasThreadId, reason || null);
+      return {
+        content: [{
+          type: "text",
+          text: `Linked: thread ${result.aliasThreadId} now folds into thread ${result.threadId}. ` +
+            `thread_summary on ${result.threadId} will include both histories from now on.`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
   }
 );
 

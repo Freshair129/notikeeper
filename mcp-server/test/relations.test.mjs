@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { openDb, reindex, getThread, listThreads, listUsers } from "../relations.mjs";
+import { openDb, reindex, getThread, listThreads, listUsers, linkThreadAlias } from "../relations.mjs";
 
 /**
  * Exercises relations.mjs's ETL — parseRow + reindex — against a real
@@ -196,4 +196,111 @@ test("G-12 migration: an old-schema relations.db (users.name globally UNIQUE) is
   } finally {
     for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(tmpPath + suffix, { force: true });
   }
+});
+
+function threadIdByName(db, name) {
+  return listThreads(db).find((t) => t.name === name)?.id;
+}
+
+test("G-13: linking a renamed thread folds its history into the canonical thread's getThread()", () => {
+  const db = freshDb();
+  reindex(db, [
+    { id: 1, app: "WhatsApp", pkg: "com.whatsapp", title: "Family", text: "Alice: old name, message one", side: null, time: 1_700_000_000_000, source: "noti" },
+    { id: 2, app: "WhatsApp", pkg: "com.whatsapp", title: "Family 2024", text: "Alice: new name, message two", side: null, time: 1_700_000_100_000, source: "noti" },
+  ]);
+  const oldId = threadIdByName(db, "Family");
+  const newId = threadIdByName(db, "Family 2024");
+  assert.ok(oldId && newId, "both threads must exist before linking");
+
+  linkThreadAlias(db, newId, oldId, "renamed 'Family' -> 'Family 2024'");
+
+  const merged = getThread(db, newId);
+  assert.equal(merged.messages.length, 2, "both threads' messages must appear under the canonical thread");
+  assert.deepEqual(
+    merged.messages.map((m) => m.text),
+    ["Alice: old name, message one", "Alice: new name, message two"],
+    "merged history must stay chronologically ordered across the two source threads"
+  );
+  assert.equal(merged.mergedFrom.length, 1);
+  assert.equal(merged.mergedFrom[0].id, oldId);
+
+  db.close();
+});
+
+test("G-13: listThreads no longer lists a thread once it's been aliased into another", () => {
+  const db = freshDb();
+  reindex(db, [
+    { id: 1, app: "WhatsApp", pkg: "com.whatsapp", title: "Family", text: "Alice: old name", side: null, time: 1_700_000_000_000, source: "noti" },
+    { id: 2, app: "WhatsApp", pkg: "com.whatsapp", title: "Family 2024", text: "Alice: new name", side: null, time: 1_700_000_100_000, source: "noti" },
+  ]);
+  const oldId = threadIdByName(db, "Family");
+  const newId = threadIdByName(db, "Family 2024");
+
+  assert.equal(listThreads(db).length, 2, "sanity: both threads listed before linking");
+  linkThreadAlias(db, newId, oldId);
+  const names = listThreads(db).map((t) => t.name);
+  assert.deepEqual(names, ["Family 2024"], "the aliased-away old thread must not appear as a separate conversation");
+
+  db.close();
+});
+
+test("G-13: a thread cannot be aliased to itself", () => {
+  const db = freshDb();
+  reindex(db, [
+    { id: 1, app: "WhatsApp", pkg: "com.whatsapp", title: "Family", text: "hi", side: null, time: 1_700_000_000_000, source: "scrape" },
+  ]);
+  const id = threadIdByName(db, "Family");
+  assert.throws(() => linkThreadAlias(db, id, id));
+
+  db.close();
+});
+
+test("G-13: linking a nonexistent thread id throws rather than silently creating a dangling alias", () => {
+  const db = freshDb();
+  reindex(db, [
+    { id: 1, app: "WhatsApp", pkg: "com.whatsapp", title: "Family", text: "hi", side: null, time: 1_700_000_000_000, source: "scrape" },
+  ]);
+  const id = threadIdByName(db, "Family");
+  assert.throws(() => linkThreadAlias(db, id, 999999));
+  assert.throws(() => linkThreadAlias(db, 999999, id));
+
+  db.close();
+});
+
+test("G-13: a rename chain (A->B, then B->C) flattens so C's history includes A without a second hop", () => {
+  const db = freshDb();
+  reindex(db, [
+    { id: 1, app: "WhatsApp", pkg: "com.whatsapp", title: "Family v1", text: "scrape: v1", side: null, time: 1_700_000_000_000, source: "scrape" },
+    { id: 2, app: "WhatsApp", pkg: "com.whatsapp", title: "Family v2", text: "scrape: v2", side: null, time: 1_700_000_100_000, source: "scrape" },
+    { id: 3, app: "WhatsApp", pkg: "com.whatsapp", title: "Family v3", text: "scrape: v3", side: null, time: 1_700_000_200_000, source: "scrape" },
+  ]);
+  const v1 = threadIdByName(db, "Family v1");
+  const v2 = threadIdByName(db, "Family v2");
+  const v3 = threadIdByName(db, "Family v3");
+
+  linkThreadAlias(db, v2, v1, "v1 -> v2");
+  linkThreadAlias(db, v3, v2, "v2 -> v3");
+
+  const merged = getThread(db, v3);
+  assert.equal(merged.messages.length, 3, "all three renames' history must be reachable from the latest name");
+  assert.deepEqual(new Set(merged.mergedFrom.map((t) => t.id)), new Set([v1, v2]));
+
+  db.close();
+});
+
+test("G-13: re-pointing an already-aliased thread to an unrelated canonical is rejected", () => {
+  const db = freshDb();
+  reindex(db, [
+    { id: 1, app: "WhatsApp", pkg: "com.whatsapp", title: "A", text: "a", side: null, time: 1_700_000_000_000, source: "scrape" },
+    { id: 2, app: "WhatsApp", pkg: "com.whatsapp", title: "B", text: "b", side: null, time: 1_700_000_100_000, source: "scrape" },
+    { id: 3, app: "WhatsApp", pkg: "com.whatsapp", title: "C", text: "c", side: null, time: 1_700_000_200_000, source: "scrape" },
+  ]);
+  const a = threadIdByName(db, "A");
+  const b = threadIdByName(db, "B");
+  const c = threadIdByName(db, "C");
+
+  linkThreadAlias(db, b, a); // a is now aliased to b
+  assert.throws(() => linkThreadAlias(db, c, a)); // re-pointing a straight to an unrelated c must fail
+
+  db.close();
 });

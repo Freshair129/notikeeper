@@ -218,6 +218,30 @@ function initSchema(db) {
       FOREIGN KEY (user_id)   REFERENCES users(id)
     );
 
+    -- See G-13 in the capture-to-archive integrity audit: threads are keyed
+    -- on (app_id, name), so a renamed conversation (group title changed,
+    -- contact renamed) starts a brand-new thread row with no link back to
+    -- its history under the old name. None of the capture surfaces (a
+    -- notification's title, an accessibility-read screen's visible header)
+    -- carry a stable app-internal conversation id -- only ever the currently
+    -- displayed name -- so a rename can never be told apart from "this is
+    -- actually a different conversation that happens to share a name" by
+    -- inference alone; guessing either way risks silently merging two
+    -- unrelated people's histories, exactly the failure this table exists to
+    -- avoid. So this only ever records a link when something outside pure
+    -- inference asserts one (see linkThreadAlias) -- nothing populates it
+    -- automatically. alias_thread_id is the PRIMARY KEY: one alias thread
+    -- points at exactly one canonical thread, never a chain of aliases.
+    CREATE TABLE IF NOT EXISTS thread_aliases (
+      thread_id       INTEGER NOT NULL, -- canonical thread this alias folds into
+      alias_thread_id INTEGER NOT NULL PRIMARY KEY,
+      reason          TEXT,
+      created_at      INTEGER NOT NULL,
+      FOREIGN KEY (thread_id)       REFERENCES threads(id),
+      FOREIGN KEY (alias_thread_id) REFERENCES threads(id),
+      CHECK (thread_id != alias_thread_id)
+    );
+
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY,
       thread_id INTEGER NOT NULL,
@@ -561,14 +585,82 @@ export function deleteMessages(db, rawKeys) {
   return { deleted, threadsUpdated: threadIds.size, usersUpdated: userIds.size };
 }
 
+/**
+ * Records that [aliasThreadId]'s history belongs to [canonicalThreadId] —
+ * typically "this old thread is the same conversation under its previous
+ * name" — see G-13 and thread_aliases' own doc comment in initSchema for why
+ * this is only ever asserted from outside, never inferred. Both thread rows
+ * keep existing independently (nothing is deleted or merged in place, unlike
+ * G-12's user-identity fix — a wrong alias here is meant to be correctable
+ * by calling this again with the right target, not something that destroys
+ * information if it turns out to be wrong). getThread/listThreads fold the
+ * alias in transparently once recorded.
+ *
+ * Chains are flattened automatically: if [canonicalThreadId] is itself
+ * already an alias of some other thread, the link is recorded against that
+ * ultimate target instead, so a lookup never has to walk more than one hop.
+ * Throws on a self-link, a nonexistent thread id on either side, or trying
+ * to alias a thread that other threads are already aliased to (would create
+ * a fork, not a chain — re-target those first if that's really the intent).
+ */
+export function linkThreadAlias(db, canonicalThreadId, aliasThreadId, reason = null) {
+  if (canonicalThreadId === aliasThreadId) {
+    throw new Error("a thread cannot be an alias of itself");
+  }
+  const exists = (id) => !!db.prepare("SELECT 1 FROM threads WHERE id = ?").get(id);
+  if (!exists(canonicalThreadId)) throw new Error(`no such thread: ${canonicalThreadId}`);
+  if (!exists(aliasThreadId)) throw new Error(`no such thread: ${aliasThreadId}`);
+
+  const isAliasedElsewhere = db
+    .prepare("SELECT thread_id FROM thread_aliases WHERE alias_thread_id = ?")
+    .get(aliasThreadId);
+  if (isAliasedElsewhere && isAliasedElsewhere.thread_id !== canonicalThreadId) {
+    throw new Error(
+      `thread ${aliasThreadId} is already aliased to ${isAliasedElsewhere.thread_id} — ` +
+      `link that thread instead of re-pointing an existing alias`
+    );
+  }
+
+  // Flatten: if the target is itself an alias, record against ITS canonical
+  // thread instead, so getThread never needs to walk more than one hop.
+  const targetsAlias = db
+    .prepare("SELECT thread_id FROM thread_aliases WHERE alias_thread_id = ?")
+    .get(canonicalThreadId);
+  const resolvedCanonical = targetsAlias ? targetsAlias.thread_id : canonicalThreadId;
+  if (resolvedCanonical === aliasThreadId) {
+    throw new Error("linking these threads would create a cycle");
+  }
+
+  // [aliasThreadId] may itself already be the canonical target of OTHER
+  // aliases (someone renamed A -> B, recorded that, then this call is
+  // recording a later rename B -> C). Re-point those too, so no lookup ever
+  // has to walk more than the one hop getThread actually performs.
+  db.prepare(`UPDATE thread_aliases SET thread_id = ? WHERE thread_id = ?`)
+    .run(resolvedCanonical, aliasThreadId);
+
+  db.prepare(`
+    INSERT INTO thread_aliases(thread_id, alias_thread_id, reason, created_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(alias_thread_id) DO UPDATE SET
+      thread_id = excluded.thread_id, reason = excluded.reason, created_at = excluded.created_at
+  `).run(resolvedCanonical, aliasThreadId, reason, Date.now());
+
+  return { threadId: resolvedCanonical, aliasThreadId };
+}
+
 // ---------- query helpers (used by HTTP endpoints) ----------
+// listThreads excludes threads that are now an alias of another thread (see
+// linkThreadAlias/G-13) — their history is reachable through the canonical
+// thread's getThread() result, so listing them too would show the same
+// conversation twice under two different names.
 export function listThreads(db, { app = null, limit = 200 } = {}) {
   let sql = `SELECT t.id, t.name, t.is_group, t.message_count, t.last_msg,
                     a.name AS app,
                     (SELECT text FROM messages WHERE thread_id = t.id ORDER BY time DESC LIMIT 1) AS last_text
-             FROM threads t JOIN apps a ON a.id = t.app_id`;
+             FROM threads t JOIN apps a ON a.id = t.app_id
+             WHERE t.id NOT IN (SELECT alias_thread_id FROM thread_aliases)`;
   const params = [];
-  if (app) { sql += ` WHERE a.name = ?`; params.push(app); }
+  if (app) { sql += ` AND a.name = ?`; params.push(app); }
   sql += ` ORDER BY t.last_msg DESC LIMIT ?`;
   params.push(limit);
   return db.prepare(sql).all(...params);
@@ -581,18 +673,39 @@ export function getThread(db, id, { limit = 500 } = {}) {
     FROM threads t JOIN apps a ON a.id = t.app_id
     WHERE t.id = ?`).get(id);
   if (!t) return null;
+
+  // Fold in messages from any thread aliased into this one (a prior name
+  // for the same conversation, per G-13) so history reads as continuous
+  // across the rename without the underlying thread rows being merged.
+  const aliasedIds = db
+    .prepare("SELECT alias_thread_id AS id FROM thread_aliases WHERE thread_id = ?")
+    .all(id)
+    .map((r) => r.id);
+  const threadIds = [id, ...aliasedIds];
+  const placeholders = threadIds.map(() => "?").join(",");
+
   const messages = db.prepare(`
     SELECT m.id, m.time, m.source, m.side, m.text, m.reply_to_id, m.time_exact,
            u.name AS sender
     FROM messages m LEFT JOIN users u ON u.id = m.sender_id
-    WHERE m.thread_id = ?
-    ORDER BY m.time ASC LIMIT ?`).all(id, limit);
+    WHERE m.thread_id IN (${placeholders})
+    ORDER BY m.time ASC LIMIT ?`).all(...threadIds, limit);
+  // GROUP BY u.id: a participant who was in the conversation both before and
+  // after a rename appears in both threadIds' participant rows — collapse to
+  // one row per person rather than showing them twice.
   const participants = db.prepare(`
     SELECT u.id, u.name, u.message_count
     FROM participants p JOIN users u ON u.id = p.user_id
-    WHERE p.thread_id = ?
-    ORDER BY u.message_count DESC`).all(id);
-  return { ...t, participants, messages };
+    WHERE p.thread_id IN (${placeholders})
+    GROUP BY u.id
+    ORDER BY u.message_count DESC`).all(...threadIds);
+
+  const mergedFrom = aliasedIds.length
+    ? db.prepare(`SELECT id, name FROM threads WHERE id IN (${aliasedIds.map(() => "?").join(",")})`)
+        .all(...aliasedIds)
+    : [];
+
+  return { ...t, participants, messages, mergedFrom };
 }
 
 export function listUsers(db, { limit = 200 } = {}) {
