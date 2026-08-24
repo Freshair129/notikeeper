@@ -23,7 +23,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import QRCode from "qrcode";
 import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages, linkThreadAlias } from "./relations.mjs";
-import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows } from "./raw-store.mjs";
+import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows, allRawRows } from "./raw-store.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
@@ -32,8 +32,8 @@ import crypto from "node:crypto";
 import { BIND_HOST, IS_LOOPBACK_ONLY, LOCALHOST, LOOPBACK_HOST, PORT, TOKEN_FILE, readLocalToken } from "./config.mjs";
 import { classifyNoise } from "./noise.mjs";
 
-// Defined here, ahead of everything else that touches `rows`, because
-// dedupCleanup() (below) now needs it at module load time — startup runs a
+// Defined here, ahead of the rest of the ingest/dedup machinery below,
+// because dedupCleanup() needs it at module load time — startup runs a
 // dedup pass before the server is otherwise ready, so this can't wait until
 // wherever it's next convenient to declare a `const`.
 const isNoise = (r) => classifyNoise(r) !== null;
@@ -90,7 +90,19 @@ function saveConfig() {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 2));
 }
 
-const rows = [];
+// `rows` (a permanently-resident array of every captured row, growing
+// forever) is gone — see G-19 in the capture-to-archive integrity audit.
+// `seen` stays: it's the ingest-time durability gate (see ingest()'s own
+// doc comment) and needs to answer "have I durably stored this raw_key"
+// synchronously and unconditionally on every /ingest call. Making that
+// check depend on a query against raw.db instead — a *second* store,
+// populated by a write that's allowed to fail without blocking the
+// response (see the try/catch around insertRawRows below) — would mean a
+// raw.db-specific hiccup could make an already-durable row look "new"
+// again on resubmission, re-appending an actual duplicate into data.jsonl.
+// `seen` is a Set of short string keys, not full row objects — the memory
+// cost this whole file's `rows` array carried was the full objects, not
+// the keys; keeping just the keys resident is the safe, small trade-off.
 const seen = new Set();
 const keyOf = (r) => `${r.id}-${r.time}`;
 
@@ -103,17 +115,39 @@ function broadcast(event, payload) {
   }
 }
 
-function load() {
-  if (!fs.existsSync(DATA_FILE)) return;
+/**
+ * Parses every line of DATA_FILE into an object, skipping blank/malformed
+ * lines. No dedup against `seen` here — data.jsonl itself should never
+ * contain two lines with the same raw_key (ingest() never durably writes a
+ * duplicate in the first place), so a plain parse is already correct.
+ * Callers that need dedup-against-`seen` semantics (just load(), below, the
+ * one-time startup bootstrap) do that themselves.
+ */
+function parseDataFile() {
+  if (!fs.existsSync(DATA_FILE)) return [];
+  const out = [];
   for (const line of fs.readFileSync(DATA_FILE, "utf8").split("\n")) {
     const t = line.trim();
     if (!t) continue;
-    try {
-      const r = JSON.parse(t);
-      const k = keyOf(r);
-      if (!seen.has(k)) { seen.add(k); rows.push(r); }
-    } catch { /* skip */ }
+    try { out.push(JSON.parse(t)); } catch { /* skip */ }
   }
+  return out;
+}
+
+/**
+ * One-time startup bootstrap: parses DATA_FILE, populates `seen` from every
+ * row found (deduping on raw_key exactly like the old rows-populating
+ * version did), and returns the parsed rows so the caller can seed
+ * raw.db/relations.db with them. Not held onto anywhere after that — see
+ * the IIFE this feeds below.
+ */
+function load() {
+  const out = [];
+  for (const r of parseDataFile()) {
+    const k = keyOf(r);
+    if (!seen.has(k)) { seen.add(k); out.push(r); }
+  }
+  return out;
 }
 
 /**
@@ -202,51 +236,50 @@ function ingest(arr) {
     // critically nothing above has touched `seen`/`rows` for these rows yet.
     appendDurable(DATA_FILE, text);
 
-    for (let i = 0; i < candidates.length; i++) {
-      seen.add(candidateKeys[i]);
-      rows.push(candidates[i]);
-    }
+    for (let i = 0; i < candidates.length; i++) seen.add(candidateKeys[i]);
     for (const r of candidates) {
       const n = Number(r.id);
       if (!Number.isNaN(n) && (ackThroughId === null || n > ackThroughId)) ackThroughId = n;
     }
-    // Keep the raw.db mirror in lock-step with `rows`/`seen` (see G-19,
-    // raw-store.mjs) — same "don't let a fold failure block the response
-    // that's already durably true" reasoning as the relations.db fold below.
+    // Keep the raw.db mirror in lock-step with `seen` (see G-19, raw-store.mjs)
+    // — same "don't let a fold failure block the response that's already
+    // durably true" reasoning as the relations.db fold below. Note this is
+    // NOT what makes a row durable — appendDurable() above already did that;
+    // this only keeps the queryable mirror in sync with what's now on disk.
     try { insertRawRows(RAWDB, candidates, keyOf); } catch (e) { console.error("[raw-store] mirror failed:", e.message); }
     // incrementally fold the new rows into the relational DB
     try { reindex(RDB, candidates); } catch (e) { console.error("[relations] fold failed:", e.message); }
-    broadcast("new", { count: candidates.length, total: rows.length, sample: candidates.slice(-3) });
+    broadcast("new", { count: candidates.length, total: countRawRows(RAWDB), sample: candidates.slice(-3) });
   }
 
   return { fresh: candidates, ackThroughId: ackThroughId ?? 0 };
 }
 
-load();
-console.error(`[notikeeper-mcp] loaded ${rows.length} rows from ${DATA_FILE}`);
-
-// SQLite mirror of the raw archive — see raw-store.mjs's own doc comment and
-// G-19 in the capture-to-archive integrity audit. Step 1 only: this is
-// populated alongside `rows`/`seen`, not read from anywhere yet, so a bug
-// here cannot change anything currently observable. insertRawRows is
-// idempotent (INSERT OR IGNORE keyed on the same raw_key `seen` uses), so
-// this also naturally catches raw.db up if it's ever behind — a fresh
-// database, an interrupted previous run, or a manually deleted file are all
-// the same case: nothing there yet gets backfilled, everything already
-// there is a no-op.
+// One-time startup bootstrap. `initialRows` lives only inside this IIFE —
+// unlike the old module-level `rows` array, nothing keeps it (or a renamed
+// copy of it) resident after this block finishes; it's eligible for GC the
+// moment the IIFE returns. See G-19.
 const RAWDB = openRawDb(path.join(__dirname, "raw.db"));
-insertRawRows(RAWDB, rows, keyOf);
-{
+(function bootstrapRawDb() {
+  const initialRows = load();
+  console.error(`[notikeeper-mcp] loaded ${initialRows.length} rows from ${DATA_FILE}`);
+  insertRawRows(RAWDB, initialRows, keyOf);
   const mirrored = countRawRows(RAWDB);
-  const log = mirrored === rows.length ? console.error : console.warn;
-  log(`[notikeeper-mcp] raw.db mirror: ${mirrored}/${rows.length} rows` +
-    (mirrored === rows.length ? "" : " — MISMATCH, investigate before relying on this store"));
-}
+  const log = mirrored === initialRows.length ? console.error : console.warn;
+  log(`[notikeeper-mcp] raw.db mirror: ${mirrored}/${initialRows.length} rows` +
+    (mirrored === initialRows.length ? "" : " — MISMATCH, investigate before relying on this store"));
+})();
 
-// Relational DB — derived view over data.jsonl
+// Relational DB — derived view over data.jsonl. Sourced from raw.db (see
+// allRawRows), not a resident `rows` array — relations.db is itself a fully
+// disposable, rebuildable-from-scratch derived cache (see G-12's commit for
+// the same reasoning applied to the users-table migration), so it's fine for
+// this specific path to trust raw.db rather than needing the stronger
+// never-trust-a-possibly-drifted-mirror guarantee dedupCleanup() below holds
+// itself to — nothing here can destroy data that isn't itself disposable.
 const RDB = openDb(path.join(__dirname, "relations.db"));
 function rebuildRelations() {
-  const result = reindex(RDB, rows);
+  const result = reindex(RDB, allRawRows(RAWDB));
   console.error(`[notikeeper-mcp] relations: +${result.inserted} (${result.threads} threads, ${result.users} users)`);
   return result;
 }
@@ -322,8 +355,19 @@ function atomicWriteFileSync(filePath, content, { retries = 5, retryDelayMs = 15
 }
 
 function dedupCleanup() {
+  // Reads DATA_FILE directly — the primary source of truth — rather than
+  // raw.db. raw.db is kept in sync via best-effort writes that are allowed
+  // to fail without blocking an /ingest response (see ingest()'s comment on
+  // insertRawRows); trusting it here, where the result gets written BACK
+  // over data.jsonl, would mean a rare raw.db-specific hiccup could bake
+  // itself in as permanent data loss the next time this runs. See G-19 and
+  // allRawRows' own doc comment in raw-store.mjs for the same distinction
+  // applied to rebuildRelations(), where trusting raw.db is fine because
+  // relations.db is fully disposable and this isn't.
+  const currentRows = parseDataFile();
+
   const groups = new Map();
-  for (const r of rows) {
+  for (const r of currentRows) {
     // Only rows the noise classifier already treats as not a meaningful
     // message — promo blasts, system spam, sticker/URL reposts, generic-title
     // chrome — are even eligible to be grouped here. This used to run over
@@ -355,17 +399,11 @@ function dedupCleanup() {
   if (toRemove.size === 0) return { removed: 0, groups: 0 };
 
   // One pass building both arrays, not two separate .filter() calls over the
-  // same (potentially large) rows array — see G-19 in the capture-to-archive
-  // integrity audit ("dedup builds three more full copies"). This addresses
-  // that specific sub-claim only; the bigger one (the whole store lives
-  // resident in `rows`/`seen` at all, not queried from relations.db) is a
-  // real architecture change to a server this session's user runs
-  // persistently, deliberately left for its own dedicated pass rather than
-  // attempted alongside everything else this wave touched — see the commit
-  // message.
+  // same (potentially large) array — see G-19 ("dedup builds three more
+  // full copies").
   const removedRows = [];
   const keptRows = [];
-  for (const r of rows) {
+  for (const r of currentRows) {
     (toRemove.has(keyOf(r)) ? removedRows : keptRows).push(r);
   }
 
@@ -375,13 +413,14 @@ function dedupCleanup() {
     .join("\n") + "\n";
   fs.appendFileSync(DEDUP_LOG_FILE, archiveLines);
 
-  // Write the new archive BEFORE touching any in-memory state. If this throws
-  // (a persistent Windows file lock outlasting atomicWriteFileSync's retries,
-  // a full disk, ...), the in-memory `rows`/`seen` must stay exactly as they
-  // were — untouched, still matching what's on disk — rather than racing ahead
-  // to a deduped state the file itself was never updated to reflect. Not
-  // caught here: propagates out of dedupCleanup so every caller (startup,
-  // the hourly timer, POST /api/dedup/rebuild) sees this pass failed.
+  // Write the new archive BEFORE touching `seen` or either mirror. If this
+  // throws (a persistent Windows file lock outlasting atomicWriteFileSync's
+  // retries, a full disk, ...), nothing below runs — `seen`, raw.db, and
+  // relations.db all stay exactly as they were, still matching what's on
+  // disk, rather than racing ahead to a deduped state the file itself was
+  // never updated to reflect. Not caught here: propagates out of
+  // dedupCleanup so every caller (startup, the hourly timer, POST
+  // /api/dedup/rebuild) sees this pass failed.
   try {
     atomicWriteFileSync(DATA_FILE, keptRows.map((r) => JSON.stringify(r)).join("\n") + "\n");
   } catch (e) {
@@ -389,10 +428,14 @@ function dedupCleanup() {
     return { removed: 0, groups: 0, error: e.message };
   }
 
-  rows.length = 0;
-  for (const r of keptRows) rows.push(r);
-  seen.clear();
-  for (const r of rows) seen.add(keyOf(r));
+  // A removed row's raw_key is no longer durable — drop it from `seen` so a
+  // genuine future resubmission of that exact row (unlikely, but possible:
+  // a retried old upload batch, a re-scrape) is treated as new rather than
+  // silently swallowed as "already seen" against a row that no longer
+  // exists. Equivalent to the old code's `seen.clear()` + rebuild from the
+  // post-dedup rows array, just without needing that array to be resident
+  // to rebuild from.
+  for (const r of removedRows) seen.delete(keyOf(r));
 
   // Keep raw.db's mirror consistent with the file write above — same
   // reasoning as the incremental insert in ingest(). Uses server.mjs's own
@@ -418,7 +461,7 @@ function dedupCleanup() {
     `[dedup] removed ${removedRows.length} exact-duplicate rows across ${groupsAffected} groups ` +
     `(archived to ${path.basename(DEDUP_LOG_FILE)})`
   );
-  broadcast("dedup", { removed: removedRows.length, groups: groupsAffected, total: rows.length });
+  broadcast("dedup", { removed: removedRows.length, groups: groupsAffected, total: keptRows.length });
   return { removed: removedRows.length, groups: groupsAffected };
 }
 
@@ -575,9 +618,9 @@ const httpServer = http.createServer((req, res) => {
       // successful call. See ingest()'s doc comment for why there is
       // deliberately no fallback to the store's overall max id here anymore.
       sendJson(res, 200, {
-        ok: true, received: result.fresh.length, total: rows.length, ackedThroughId: result.ackThroughId,
+        ok: true, received: result.fresh.length, total: countRawRows(RAWDB), ackedThroughId: result.ackThroughId,
       });
-      console.error(`[notikeeper-mcp] ingested ${result.fresh.length} new (total ${rows.length})`);
+      console.error(`[notikeeper-mcp] ingested ${result.fresh.length} new (total ${countRawRows(RAWDB)})`);
     });
     return;
   }

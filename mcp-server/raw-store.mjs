@@ -194,3 +194,25 @@ export function filterRawRows(db, { query, app, source, sinceMs, untilMs, sinceI
   }
   return out;
 }
+
+/**
+ * Every row currently in the store, reconstructed from raw_json — used
+ * where a caller genuinely needs the complete archive transiently (e.g.
+ * rebuilding relations.db from scratch). Not held resident by this module;
+ * the caller's own scope decides whether the result outlives one call.
+ *
+ * Not used for anything that writes back to data.jsonl (see dedupCleanup in
+ * server.mjs, which deliberately reads data.jsonl directly instead) — this
+ * store is kept in sync with data.jsonl via best-effort writes that are
+ * allowed to fail without blocking an /ingest response, so a caller that
+ * would destroy or rewrite the primary archive based on this store's
+ * content could bake in a rare drift as permanent data loss. Safe for
+ * read-only, fully-disposable-if-wrong consumers like relations.db.
+ */
+export function allRawRows(db) {
+  const out = [];
+  for (const r of db.prepare("SELECT raw_json FROM raw_rows").iterate()) {
+    out.push(JSON.parse(r.raw_json));
+  }
+  return out;
+}

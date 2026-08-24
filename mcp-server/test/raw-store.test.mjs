@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows } from "../raw-store.mjs";
+import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows, allRawRows } from "../raw-store.mjs";
 
 // Same key server.mjs's in-memory `seen` Set already uses.
 const keyOf = (r) => `${r.id}-${r.time}`;
@@ -250,5 +250,34 @@ test("filterRawRows combines multiple filters with AND", () => {
   const out = filterRawRows(db, { source: "noti", app: "whats", denoise: true });
   assert.deepEqual(out.map((r) => r.id), [1]);
 
+  db.close();
+});
+
+// ---------- allRawRows — used by server.mjs's rebuildRelations() (G-19) ----------
+
+test("allRawRows reconstructs every row exactly, with no filter/order guarantees relied upon by callers", () => {
+  const db = freshDb();
+  const seeded = [
+    { id: 1, time: 3_000, source: "noti", app: "WhatsApp", text: "c" },
+    { id: 2, time: 1_000, source: "scrape", app: "LINE", text: "a" },
+    { id: 3, time: 2_000, source: "screen", app: "WhatsApp", text: "b" },
+  ];
+  insertRawRows(db, seeded, keyOf);
+
+  const out = allRawRows(db);
+  assert.equal(out.length, 3);
+  assert.deepEqual(new Set(out.map((r) => r.id)), new Set([1, 2, 3]));
+  // Each reconstructed row must exactly match what was inserted, field for field.
+  for (const original of seeded) {
+    const found = out.find((r) => r.id === original.id);
+    assert.deepEqual(found, original);
+  }
+
+  db.close();
+});
+
+test("allRawRows on an empty store returns an empty array, not null/undefined", () => {
+  const db = freshDb();
+  assert.deepEqual(allRawRows(db), []);
   db.close();
 });
