@@ -699,30 +699,62 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/api/stats") {
-    const byApp = {}, bySource = {}, byNoise = {}, byPkg = {};
-    let min = Infinity, max = -Infinity, noiseCount = 0;
-    for (const r of rows) {
-      byApp[r.app] = (byApp[r.app] || 0) + 1;
-      bySource[r.source] = (bySource[r.source] || 0) + 1;
-      if (r.pkg) {
-        if (!byPkg[r.pkg]) byPkg[r.pkg] = { app: r.app, count: 0 };
-        byPkg[r.pkg].count++;
-      }
-      if (r.time < min) min = r.time;
-      if (r.time > max) max = r.time;
-      const tag = classifyNoise(r);
+    // Sourced from raw.db, not the in-memory `rows` array — see G-19 in the
+    // capture-to-archive integrity audit and raw-store.mjs's own doc
+    // comment. total/byApp/bySource/byPkg/minTime/maxTime are all real
+    // indexed SQL aggregates now, not a JS reduction over every row in
+    // memory. byNoise/noiseCount still need one pass over every row's full
+    // shape (classifyNoise takes the whole object, not something SQL can
+    // evaluate) — same total cost as before, but reading raw_json back out
+    // of the DB via .iterate() rather than requiring `rows` to be resident
+    // for this endpoint's sake specifically.
+    //
+    // Two intentional, minor differences from the old in-memory version,
+    // both edge cases that shouldn't occur against a healthy archive:
+    //  - A row with a genuinely missing `app` grouped under the JS object
+    //    key "undefined" before (r.app coerced by property-access syntax);
+    //    it groups under SQL NULL here, surfaced as the key "null" instead.
+    //  - byApp's tie-break for two apps with the exact same count used to
+    //    be "whichever was encountered first walking the in-memory array"
+    //    (an accident of insertion order, not a deliberate choice); it's
+    //    alphabetical now (ORDER BY n DESC, app ASC) — deterministic across
+    //    runs instead of dependent on ingest history.
+    const totals = RAWDB.prepare(
+      "SELECT COUNT(*) AS total, MIN(time) AS minTime, MAX(time) AS maxTime FROM raw_rows"
+    ).get();
+
+    const byApp = {};
+    for (const r of RAWDB.prepare(
+      "SELECT app, COUNT(*) AS n FROM raw_rows GROUP BY app ORDER BY n DESC, app ASC"
+    ).all()) byApp[r.app] = r.n;
+
+    const bySource = {};
+    for (const r of RAWDB.prepare(
+      "SELECT source, COUNT(*) AS n FROM raw_rows GROUP BY source ORDER BY source ASC"
+    ).all()) bySource[r.source] = r.n;
+
+    const byPkg = {};
+    for (const r of RAWDB.prepare(
+      "SELECT pkg, app, COUNT(*) AS n FROM raw_rows WHERE pkg IS NOT NULL AND pkg != '' GROUP BY pkg"
+    ).all()) byPkg[r.pkg] = { app: r.app, count: r.n };
+
+    let noiseCount = 0;
+    const byNoise = {};
+    for (const r of RAWDB.prepare("SELECT raw_json FROM raw_rows").iterate()) {
+      const tag = classifyNoise(JSON.parse(r.raw_json));
       if (tag) { noiseCount++; byNoise[tag] = (byNoise[tag] || 0) + 1; }
     }
+
     sendJson(res, 200, {
-      total: rows.length,
+      total: totals.total,
       noiseCount,
-      cleanCount: rows.length - noiseCount,
+      cleanCount: totals.total - noiseCount,
       byNoise,
-      byApp: Object.fromEntries(Object.entries(byApp).sort((a, b) => b[1] - a[1])),
+      byApp,
       byPkg,
       bySource,
-      minTime: rows.length ? min : null,
-      maxTime: rows.length ? max : null,
+      minTime: totals.total ? totals.minTime : null,
+      maxTime: totals.total ? totals.maxTime : null,
     }, "application/json; charset=utf-8");
     return;
   }
