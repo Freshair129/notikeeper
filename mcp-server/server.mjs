@@ -627,7 +627,7 @@ const httpServer = http.createServer((req, res) => {
       sinceId: parseInt(url.searchParams.get("sinceId") || "0", 10) || 0,
       denoise: url.searchParams.get("denoise") === "1",
     }).sort(byNewest).slice(0, limit);
-    sendJson(res, 200, { total: filtered.length, all: rows.length, rows: filtered }, "application/json; charset=utf-8");
+    sendJson(res, 200, { total: filtered.length, all: countRawRows(RAWDB), rows: filtered }, "application/json; charset=utf-8");
     return;
   }
 
@@ -1120,7 +1120,7 @@ const httpServer = http.createServer((req, res) => {
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no",
     });
-    res.write(`event: hello\ndata: {"total":${rows.length}}\n\n`);
+    res.write(`event: hello\ndata: {"total":${countRawRows(RAWDB)}}\n\n`);
     sseClients.add(res);
     const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch {} }, 25000);
     req.on("close", () => { clearInterval(ping); sseClients.delete(res); });
@@ -1167,24 +1167,31 @@ mcp.tool(
 );
 
 mcp.tool("list_apps", {}, async () => {
-  const counts = {};
-  for (const r of rows) counts[r.app] = (counts[r.app] || 0) + 1;
-  const lines = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([a, c]) => `${a}: ${c}`);
+  // Sourced from raw.db, not the in-memory `rows` array — see G-19. Same
+  // per-app aggregate /api/stats's byApp already computes (Wave 16); tie
+  // order is alphabetical (ORDER BY n DESC, app ASC) rather than whatever
+  // order `rows` happened to encounter apps in, for the same reason.
+  const counts = RAWDB.prepare(
+    "SELECT app, COUNT(*) AS n FROM raw_rows GROUP BY app ORDER BY n DESC, app ASC"
+  ).all();
+  const lines = counts.map((r) => `${r.app}: ${r.n}`);
   return { content: [{ type: "text", text: lines.join("\n") || "no data" }] };
 });
 
 mcp.tool("stats", {}, async () => {
+  // Sourced from raw.db, not the in-memory `rows` array — see G-19.
+  const totals = RAWDB.prepare(
+    "SELECT COUNT(*) AS total, MIN(time) AS minTime, MAX(time) AS maxTime FROM raw_rows"
+  ).get();
   const bySource = {};
-  let min = Infinity, max = -Infinity;
-  for (const r of rows) {
-    bySource[r.source] = (bySource[r.source] || 0) + 1;
-    if (r.time < min) min = r.time;
-    if (r.time > max) max = r.time;
-  }
+  for (const r of RAWDB.prepare(
+    "SELECT source, COUNT(*) AS n FROM raw_rows GROUP BY source ORDER BY source ASC"
+  ).all()) bySource[r.source] = r.n;
+
   const text = [
-    `total rows: ${rows.length}`,
+    `total rows: ${totals.total}`,
     `by source: ${JSON.stringify(bySource)}`,
-    rows.length ? `range: ${new Date(min).toLocaleString()} -> ${new Date(max).toLocaleString()}` : "range: -",
+    totals.total ? `range: ${new Date(totals.minTime).toLocaleString()} -> ${new Date(totals.maxTime).toLocaleString()}` : "range: -",
     `dashboard: http://${LOCALHOST}:${PORT}/`,
     `data file: ${DATA_FILE}`,
   ].join("\n");
