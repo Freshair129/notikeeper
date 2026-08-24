@@ -16,16 +16,27 @@
  * (indexed) columns and the full original object also kept as JSON so
  * nothing is lost to a field this module didn't anticipate.
  *
- * Deliberately scoped: this module only stores and retrieves rows. It does
- * NOT yet replace `rows` as what server.mjs's endpoints read from — that's
- * later work, done incrementally and verified endpoint by endpoint rather
- * than in one pass, given this is the server the user runs persistently.
+ * server.mjs's endpoints are being migrated onto this store one at a time
+ * (step 1, Wave 15, was purely additive; /api/stats moved over in Wave 16),
+ * each swap verified independently against the exact pre-migration logic
+ * rather than all at once, given this is the server the user runs
+ * persistently.
  */
 import Database from "better-sqlite3";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { classifyNoise } from "./noise.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+/** Escapes SQL LIKE's two wildcard characters (and the escape character
+ *  itself) so a filter value containing a literal "%" or "_" — e.g.
+ *  searching for "50% off" — matches that literal text instead of the
+ *  wildcard being interpreted. Paired with `LIKE ? ESCAPE '\'` at every
+ *  call site below. */
+function escapeLike(s) {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
 
 export function openRawDb(filePath) {
   const dbPath = filePath || path.join(__dirname, "raw.db");
@@ -132,4 +143,54 @@ export function deleteRawRows(db, rawKeys) {
 
 export function countRawRows(db) {
   return db.prepare("SELECT COUNT(*) AS n FROM raw_rows").get().n;
+}
+
+/**
+ * SQL replacement for server.mjs's old filterRows() linear scan over `rows`
+ * — see G-19. Every filter that SQL can express (time range, sinceId, exact
+ * source, app/text substring search) runs as a real indexed/pattern query;
+ * only `denoise` still needs a JS pass per candidate row, because
+ * classifyNoise() takes the row's full original shape and isn't something
+ * SQL can evaluate — same constraint /api/stats's byNoise breakdown already
+ * has. Results come back sorted newest-first (time DESC), matching the
+ * `.sort(byNewest)` the old code applied to filterRows()'s output.
+ *
+ * [sinceId] compares as an integer (CAST(id AS INTEGER) > ?), not a string
+ * — id is stored as TEXT (see openRawDb's schema comment: no shared
+ * numbering scheme across producers), so a plain SQL `id > ?` would compare
+ * lexicographically ("9" > "10") instead of numerically, same trap the old
+ * code's explicit `Number(r.id)` avoided.
+ *
+ * Search terms are LIKE-escaped (see escapeLike) so a literal "%" or "_" in
+ * a search — "50% off" — matches that literal text rather than being
+ * treated as a wildcard, which the old code's plain `.includes()` never had
+ * to worry about. SQLite's LIKE is case-insensitive for ASCII by default
+ * (not full Unicode case-folding) — for this app's real content (Thai has
+ * no case distinction; English is ASCII) this matches the old code's
+ * `.toLowerCase().includes()` behavior in practice; accented Latin text is
+ * the one case where the two could disagree.
+ */
+export function filterRawRows(db, { query, app, source, sinceMs, untilMs, sinceId, denoise = false } = {}) {
+  const clauses = [];
+  const params = [];
+  if (sinceMs) { clauses.push("time >= ?"); params.push(sinceMs); }
+  if (untilMs) { clauses.push("time < ?"); params.push(untilMs); }
+  if (sinceId) { clauses.push("CAST(id AS INTEGER) > ?"); params.push(sinceId); }
+  if (source) { clauses.push("source = ?"); params.push(source); }
+  if (app) { clauses.push("app LIKE ? ESCAPE '\\'"); params.push(`%${escapeLike(app)}%`); }
+  if (query) {
+    clauses.push("(text LIKE ? ESCAPE '\\' OR title LIKE ? ESCAPE '\\' OR app LIKE ? ESCAPE '\\')");
+    const like = `%${escapeLike(query)}%`;
+    params.push(like, like, like);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const stmt = db.prepare(`SELECT raw_json FROM raw_rows ${where} ORDER BY time DESC`);
+
+  const out = [];
+  for (const r of stmt.iterate(...params)) {
+    const row = JSON.parse(r.raw_json);
+    if (denoise && classifyNoise(row) !== null) continue;
+    out.push(row);
+  }
+  return out;
 }

@@ -23,7 +23,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import QRCode from "qrcode";
 import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages, linkThreadAlias } from "./relations.mjs";
-import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows } from "./raw-store.mjs";
+import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows } from "./raw-store.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
@@ -470,21 +470,15 @@ function sendJson(res, code, obj, contentType = "application/json") {
 // ---------- helpers used by every layer ----------
 const byNewest = (a, b) => b.time - a.time;
 
-function filterRows({ query, app, source, sinceMs, untilMs, sinceId, denoise = false }) {
-  const q = (query || "").toLowerCase();
-  const a = (app || "").toLowerCase();
-  return rows.filter((r) => {
-    if (sinceMs && r.time < sinceMs) return false;
-    if (untilMs && r.time >= untilMs) return false;
-    if (sinceId && !(Number(r.id) > sinceId)) return false;
-    if (source && r.source !== source) return false;
-    if (a && !(r.app || "").toLowerCase().includes(a)) return false;
-    if (q && !((r.text || "").toLowerCase().includes(q) ||
-               (r.title || "").toLowerCase().includes(q) ||
-               (r.app || "").toLowerCase().includes(q))) return false;
-    if (denoise && isNoise(r)) return false;
-    return true;
-  });
+// Thin wrapper kept so all four existing call sites (/api/messages,
+// /api/timeline, the search_messages and recent_messages MCP tools) migrate
+// onto raw.db together, from one change, rather than being individually
+// rewritten and individually able to drift out of sync with each other —
+// see G-19 and filterRawRows' own doc comment in raw-store.mjs. Was a
+// linear scan + filter over the in-memory `rows` array; now a real SQL
+// query against raw.db's indexed columns.
+function filterRows(opts) {
+  return filterRawRows(RAWDB, opts);
 }
 
 // source + a "~" time marker when the timestamp isn't a genuinely observed

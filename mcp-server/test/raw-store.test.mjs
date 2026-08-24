@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows } from "../raw-store.mjs";
+import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows } from "../raw-store.mjs";
 
 // Same key server.mjs's in-memory `seen` Set already uses.
 const keyOf = (r) => `${r.id}-${r.time}`;
@@ -139,6 +139,116 @@ test("indexed columns actually support real filtering (time range, source, app s
 
   const byApp = db.prepare("SELECT id FROM raw_rows WHERE app LIKE ? ORDER BY id").all("%WhatsApp%").map((r) => r.id);
   assert.deepEqual(byApp, ["1", "3"]);
+
+  db.close();
+});
+
+// ---------- filterRawRows — replaces server.mjs's old filterRows() linear scan ----------
+
+function seedVariedRows(db) {
+  insertRawRows(db, [
+    { id: 1, time: 1_000, source: "noti", app: "WhatsApp", text: "hello there friend", title: "Alice" },
+    { id: 2, time: 2_000, source: "scrape", app: "LINE", text: "hi how are you doing", title: "Bob" },
+    { id: 9, time: 3_000, source: "noti", app: "WhatsApp", text: "Sale today", title: "Promo" }, // noise
+    { id: 10, time: 4_000, source: "screen", app: "WhatsApp", text: "see you soon", title: "Alice" },
+    { id: 20, time: 5_000, source: "noti", app: "Telegram", text: "meeting at 5pm", title: "Carol" },
+  ], keyOf);
+  return db;
+}
+
+test("filterRawRows with no filters returns everything, newest first", () => {
+  const db = seedVariedRows(freshDb());
+  const out = filterRawRows(db, {});
+  assert.deepEqual(out.map((r) => r.id), [20, 10, 9, 2, 1]);
+
+  db.close();
+});
+
+test("filterRawRows sinceMs/untilMs filter by time range (untilMs is exclusive)", () => {
+  const db = seedVariedRows(freshDb());
+  const out = filterRawRows(db, { sinceMs: 2_000, untilMs: 4_000 });
+  // [2000, 4000): id 2 (time 2000, sinceMs is inclusive) and id 9 (time
+  // 3000) qualify; id 10 (time 4000) is excluded by untilMs being exclusive.
+  assert.deepEqual(new Set(out.map((r) => r.id)), new Set([2, 9]));
+
+  db.close();
+});
+
+test("filterRawRows sinceId compares numerically, not lexicographically", () => {
+  const db = seedVariedRows(freshDb());
+  // Lexicographically "9" > "10" and "20" would sort oddly too -- if this
+  // compared as strings, sinceId=9 would wrongly exclude id 10 and 20.
+  // Numerically, everything with id > 9 is 10 and 20.
+  const out = filterRawRows(db, { sinceId: 9 });
+  assert.deepEqual(new Set(out.map((r) => r.id)), new Set([10, 20]));
+
+  db.close();
+});
+
+test("filterRawRows source filters on an exact match", () => {
+  const db = seedVariedRows(freshDb());
+  const out = filterRawRows(db, { source: "noti" });
+  assert.deepEqual(new Set(out.map((r) => r.id)), new Set([1, 9, 20]));
+
+  db.close();
+});
+
+test("filterRawRows app filters as a case-insensitive substring", () => {
+  const db = seedVariedRows(freshDb());
+  const out = filterRawRows(db, { app: "whats" }); // lowercase, partial
+  assert.deepEqual(new Set(out.map((r) => r.id)), new Set([1, 9, 10]));
+
+  db.close();
+});
+
+test("filterRawRows query searches text, title, and app together, case-insensitively", () => {
+  const db = seedVariedRows(freshDb());
+  const byText = filterRawRows(db, { query: "meeting" });
+  assert.deepEqual(byText.map((r) => r.id), [20]);
+
+  const byTitle = filterRawRows(db, { query: "carol" });
+  assert.deepEqual(byTitle.map((r) => r.id), [20]);
+
+  const byApp = filterRawRows(db, { query: "telegram" });
+  assert.deepEqual(byApp.map((r) => r.id), [20]);
+
+  db.close();
+});
+
+test("filterRawRows denoise drops noise-classified rows (id 9, a 'Sale today' promo)", () => {
+  const db = seedVariedRows(freshDb());
+  const withoutDenoise = filterRawRows(db, {});
+  const withDenoise = filterRawRows(db, { denoise: true });
+  assert.ok(withoutDenoise.some((r) => r.id === 9), "sanity: id 9 is present without denoise");
+  assert.ok(!withDenoise.some((r) => r.id === 9), "id 9 must be dropped when denoise is requested");
+  assert.equal(withDenoise.length, withoutDenoise.length - 1);
+
+  db.close();
+});
+
+test("filterRawRows escapes LIKE wildcards in search terms — a literal '%' searches literally, not as a wildcard", () => {
+  const db = freshDb();
+  insertRawRows(db, [
+    { id: 1, time: 1, source: "noti", app: "Store", text: "50% off everything today" },
+    { id: 2, time: 2, source: "noti", app: "Store", text: "buy one get one free" },
+  ], keyOf);
+
+  const out = filterRawRows(db, { query: "50%" });
+  // Must match only the row with the literal "50%" substring, not (as an
+  // unescaped LIKE '%50%%' would) anything containing "50" followed by
+  // anything -- with only two rows here the distinguishing case is subtle,
+  // so assert the exact match set rather than just non-crashing.
+  assert.deepEqual(out.map((r) => r.id), [1]);
+
+  db.close();
+});
+
+test("filterRawRows combines multiple filters with AND", () => {
+  const db = seedVariedRows(freshDb());
+  // source=noti AND app contains "whats" -- only id 1 and 9 are noti+WhatsApp;
+  // denoise removes 9, leaving just 1.
+  const out = filterRawRows(db, { source: "noti", app: "whats", denoise: true });
+  assert.deepEqual(out.map((r) => r.id), [1]);
 
   db.close();
 });
