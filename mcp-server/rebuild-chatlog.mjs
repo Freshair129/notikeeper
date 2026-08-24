@@ -403,48 +403,66 @@ function main() {
   for (const { app, title, msgs } of byThread.values()) {
     if (isBadTitle(title)) { totalDropped += msgs.length; continue; }
 
-    // Detect bulk screen dumps: if the same timestamp has ≥5 screen+side=me records,
-    // it's an inbox list snapshot (contact names visible on screen), not sent messages.
+    // Detect bulk screen dumps: if the same timestamp has ≥5 screen records of
+    // one side, it's an inbox list snapshot (contact names/previews visible on
+    // screen all at once), not real sent/received messages. Checked for both
+    // sides — an inbox list can just as easily produce a burst of side="them"
+    // rows (other people's names/previews) as side="me" ones.
     const bulkDumpTimes = new Set();
     const screenMeByTime = new Map();
+    const screenThemByTime = new Map();
     for (const m of msgs) {
-      if (m.source === "screen" && m.side === "me") {
-        if (!screenMeByTime.has(m.time)) screenMeByTime.set(m.time, 0);
-        screenMeByTime.set(m.time, screenMeByTime.get(m.time) + 1);
-      }
+      if (m.source !== "screen") continue;
+      if (m.side === "me") screenMeByTime.set(m.time, (screenMeByTime.get(m.time) || 0) + 1);
+      else if (m.side === "them") screenThemByTime.set(m.time, (screenThemByTime.get(m.time) || 0) + 1);
     }
-    for (const [t, count] of screenMeByTime) {
-      if (count >= 5) bulkDumpTimes.add(t);
-    }
+    for (const [t, count] of screenMeByTime) if (count >= 5) bulkDumpTimes.add(t);
+    for (const [t, count] of screenThemByTime) if (count >= 5) bulkDumpTimes.add(t);
 
     // Filter message content:
     // - noti/scrape sources: always include (incoming messages)
     // - screen source with side="me": include as owner's sent messages,
     //   BUT skip if the timestamp is a bulk inbox-list dump
-    // - screen source with side!="me": skip (too noisy — UI chrome, list items, etc.)
+    // - screen source with side="them": include as the other party's messages
+    //   — see G-21 in the capture-to-archive integrity audit. This used to be
+    //   dropped unconditionally ("too noisy"), but the whole reason
+    //   MessengerReaderService exists is to capture the full thread a
+    //   notification preview only truncates; unconditionally discarding every
+    //   screen-observed reply meant the chatlog was biased toward whatever
+    //   little a notification happened to show. Same isJunkMsg chrome filter
+    //   scrape already gets, plus the same inbox-list-dump guard side="me"
+    //   already had. Tagged screenObserved at output time (below) so a reader
+    //   can tell "confirmed by a notification or the scraper" apart from
+    //   "seen on screen, filtered the same as everything else, just without
+    //   that independent confirmation."
+    // - side is "" (uncertain, see G-15's dead zone in
+    //   MessengerReaderService.sideOf): no evidence either way, still skip.
     const clean = msgs
       .filter(m => {
         if (m.source === "noti") return !isJunkMsgNoti(m.text); // noti = real incoming msg, lenient
         if (m.source !== "screen") return !isJunkMsg(m.text); // scrape: standard filter
         if (INCLUDE_SCREEN) return !isJunkMsg(m.text);        // --include-screen flag
-        // screen + side=me: owner's outgoing message
-        if (m.side === "me" && m.title === title) {
-          if (bulkDumpTimes.has(m.time)) return false; // inbox list dump — skip
-          if (!isJunkMsgOwner(m.text)) return true;
-        }
-        return false; // screen + side=them: skip (noisy UI)
+        if (m.title !== title) return false;
+        if (bulkDumpTimes.has(m.time)) return false; // inbox list dump — skip
+        if (m.side === "me") return !isJunkMsgOwner(m.text);
+        if (m.side === "them") return !isJunkMsg(m.text);
+        return false;
       })
       .sort((a, b) => a.time - b.time);
 
     const deduped = dedup(clean);
     if (deduped.length < MIN_MSGS) { totalDropped += msgs.length; continue; }
 
-    // Require at least one scrape or noti message — screen-only threads are home/search
-    // screen dumps, not real conversations. The ADB scraper only runs inside actual chats.
+    // A thread with no scrape/noti row at all — only ever observed on
+    // screen — used to be dropped entirely here, even with substantial clean
+    // content, on the theory that the ADB scraper only runs inside actual
+    // chats so a screen-only thread was probably a home/search screen dump.
+    // MIN_MSGS above already provides a quality floor; per G-21, a
+    // screen-only thread is now kept (marked, not silently equated with a
+    // scrape/noti-confirmed one) rather than discarded with no trace.
     const hasHighQuality = clean.some(m => m.source === "scrape" || m.source === "noti");
-    if (!hasHighQuality) { totalDropped += msgs.length; continue; }
 
-    goodThreads.push({ app, title, msgs: deduped, raw: msgs.length });
+    goodThreads.push({ app, title, msgs: deduped, raw: msgs.length, screenOnly: !hasHighQuality });
   }
 
   // Sort threads by most recent message
@@ -469,9 +487,14 @@ function main() {
       `Thread: ${thread.title} (${thread.app})`,
       `Messages: ${thread.msgs.length} (from ${thread.raw} raw)`,
       `Period : ${fmt(thread.msgs[0].time)} → ${fmt(thread.msgs.at(-1).time)}`,
-      "─".repeat(60),
-      "",
     ];
+    // G-21: no scrape/noti row ever confirmed this thread — everything in it
+    // was only ever observed on screen. Flagged at the thread level, not
+    // just per-line, so it's visible before reading a single message.
+    if (thread.screenOnly) {
+      lines.push("⚠ จากการอ่านหน้าจอเท่านั้น — ไม่มีการยืนยันจากการแจ้งเตือนหรือการสแครป");
+    }
+    lines.push("─".repeat(60), "");
 
     // Group messages by day for readability
     let lastDay = "";
@@ -486,7 +509,13 @@ function main() {
       }
       const time = new Date(m.time).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
       const who  = m.side === "me" ? "  ฉัน" : (m.sender || "เขา").padEnd(18);
-      lines.push(`${time}  ${who}  ${m.text}`);
+      // Per-line marker only for the newly-included screen+them rows (G-21)
+      // — screen+me has always been included, scrape/noti carry their own
+      // independent confirmation by definition, so marking every line the
+      // same way would bury the one distinction actually worth flagging.
+      const screenObserved = m.source === "screen" && m.side === "them";
+      const marker = screenObserved ? " [จากหน้าจอ]" : "";
+      lines.push(`${time}  ${who}  ${m.text}${marker}`);
     }
     lines.push("");
 
@@ -501,17 +530,23 @@ function main() {
       fs.writeFileSync(path.join(OUT_DIR, `${base}.txt`), content, "utf8");
       // JSON sidecar — consumed by dashboard /api/chatlog/:thread
       const json = {
-        app:      thread.app,
-        title:    thread.title,
-        count:    thread.msgs.length,
-        raw:      thread.raw,
-        from:     thread.msgs[0].time,
-        to:       thread.msgs.at(-1).time,
+        app:        thread.app,
+        title:      thread.title,
+        count:      thread.msgs.length,
+        raw:        thread.raw,
+        from:       thread.msgs[0].time,
+        to:         thread.msgs.at(-1).time,
+        // G-21: no scrape/noti row ever confirmed this thread.
+        screenOnly: thread.screenOnly,
         messages: thread.msgs.map(m => ({
           time:   m.time,
           side:   m.side || "them",
           sender: m.sender || null,
           text:   m.text,
+          // G-21: true for the newly-included screen+them rows — seen on
+          // screen, filtered the same as everything else, but without the
+          // independent confirmation a notification or the scraper carries.
+          screenObserved: m.source === "screen" && m.side === "them",
           source: m.source,
         })),
       };
