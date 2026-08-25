@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { openDb, reindex, getThread, listThreads, listUsers, linkThreadAlias } from "../relations.mjs";
+import { openDb, reindex, getThread, listThreads, listUsers, linkThreadAlias, findCrossStreamDuplicates, linkMessages } from "../relations.mjs";
 
 /**
  * Exercises relations.mjs's ETL — parseRow + reindex — against a real
@@ -301,6 +301,155 @@ test("G-13: re-pointing an already-aliased thread to an unrelated canonical is r
 
   linkThreadAlias(db, b, a); // a is now aliased to b
   assert.throws(() => linkThreadAlias(db, c, a)); // re-pointing a straight to an unrelated c must fail
+
+  db.close();
+});
+
+// ---------- findCrossStreamDuplicates / linkMessages (G-20) ----------
+
+function messageIdByText(db, threadId, text) {
+  return getThread(db, threadId).messages.find((m) => m.text === text)?.id;
+}
+
+function seedCrossStreamThread(db) {
+  reindex(db, [
+    // A notification preview and the screen reader's fuller capture of the
+    // same real message, 30s apart, notification text a prefix of the
+    // screen-captured one.
+    { id: 1, app: "WhatsApp", pkg: "com.whatsapp", title: "Family Chat Group", text: "Alice: dinner at 7", side: null, time: 1_700_000_000_000, source: "noti" },
+    { id: 2, app: "WhatsApp", pkg: "com.whatsapp", title: "Family Chat Group", text: "Alice: dinner at 7 tonight, don't be late", side: "them", time: 1_700_000_030_000, source: "screen" },
+    // A completely different, unrelated message shortly after -- must never
+    // be treated as a candidate pair with anything above.
+    { id: 3, app: "WhatsApp", pkg: "com.whatsapp", title: "Family Chat Group", text: "Bob: sounds good see you then", side: null, time: 1_700_000_060_000, source: "noti" },
+    // Same text, same source (both noti) -- not cross-stream, must be excluded.
+    { id: 4, app: "WhatsApp", pkg: "com.whatsapp", title: "Family Chat Group", text: "Bob: sounds good see you then", side: null, time: 1_700_000_090_000, source: "noti" },
+    // Identical text, different source, but 10 minutes apart -- outside the
+    // default 3-minute window, must be excluded.
+    { id: 5, app: "WhatsApp", pkg: "com.whatsapp", title: "Family Chat Group", text: "identical far apart text here", side: null, time: 1_700_000_120_000, source: "noti" },
+    { id: 6, app: "WhatsApp", pkg: "com.whatsapp", title: "Family Chat Group", text: "identical far apart text here", side: "them", time: 1_700_000_720_000, source: "screen" },
+  ]);
+  return threadIdByName(db, "Family Chat Group");
+}
+
+test("G-20: findCrossStreamDuplicates surfaces a prefix-matched, close-in-time, different-source pair", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+  const pairs = findCrossStreamDuplicates(db, threadId);
+
+  const found = pairs.find((p) => p.text1.includes("dinner at 7") || p.text2.includes("dinner at 7"));
+  assert.ok(found, "the notification/screen prefix pair must be surfaced");
+  assert.notEqual(found.source1, found.source2, "a candidate pair must always be cross-stream");
+
+  db.close();
+});
+
+test("G-20: same-source pairs and far-apart-in-time pairs are never surfaced as candidates", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+  const pairs = findCrossStreamDuplicates(db, threadId);
+
+  const sameSourcePair = pairs.some((p) => p.text1 === "Bob: sounds good see you then");
+  assert.equal(sameSourcePair, false, "two noti-source rows must never be a candidate pair, even with identical text");
+
+  const farApartPair = pairs.some((p) => p.text1 === "identical far apart text here");
+  assert.equal(farApartPair, false, "identical text 10 minutes apart is outside the default window");
+
+  db.close();
+});
+
+test("G-20: an unrelated message is never surfaced as a candidate with anything", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+  const pairs = findCrossStreamDuplicates(db, threadId);
+
+  const bobInvolved = pairs.some((p) => p.text1.startsWith("Bob:") || p.text2.startsWith("Bob:"));
+  assert.equal(bobInvolved, false);
+
+  db.close();
+});
+
+test("G-20: a custom windowMs widens or narrows the time-proximity check", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+
+  const narrow = findCrossStreamDuplicates(db, threadId, { windowMs: 5_000 });
+  assert.equal(narrow.some((p) => p.text1.includes("dinner at 7") || p.text2.includes("dinner at 7")), false,
+    "a 5s window must exclude the 30s-apart dinner pair");
+
+  const wide = findCrossStreamDuplicates(db, threadId, { windowMs: 700_000 });
+  assert.ok(wide.some((p) => p.text1 === "identical far apart text here" || p.text2 === "identical far apart text here"),
+    "a wide enough window must include the far-apart identical-text pair");
+
+  db.close();
+});
+
+test("G-20: linkMessages records a link and getThread reflects it via duplicateOfId", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+  const canonicalId = messageIdByText(db, threadId, "Alice: dinner at 7 tonight, don't be late");
+  const dupId = messageIdByText(db, threadId, "Alice: dinner at 7");
+
+  linkMessages(db, canonicalId, dupId, "notification preview of the screen-captured message");
+
+  const messages = getThread(db, threadId).messages;
+  const dupRow = messages.find((m) => m.id === dupId);
+  const canonicalRow = messages.find((m) => m.id === canonicalId);
+  assert.equal(dupRow.duplicateOfId, canonicalId);
+  assert.equal(canonicalRow.duplicateOfId, null, "the canonical message itself must not be marked as a duplicate");
+  // Both rows must still exist -- linking never deletes or hides either one.
+  assert.equal(messages.length, 6);
+
+  db.close();
+});
+
+test("G-20: an already-linked pair no longer appears in findCrossStreamDuplicates", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+  const canonicalId = messageIdByText(db, threadId, "Alice: dinner at 7 tonight, don't be late");
+  const dupId = messageIdByText(db, threadId, "Alice: dinner at 7");
+
+  linkMessages(db, canonicalId, dupId);
+  const pairs = findCrossStreamDuplicates(db, threadId);
+  assert.equal(pairs.some((p) => p.id1 === dupId || p.id2 === dupId), false);
+
+  db.close();
+});
+
+test("G-20: linkMessages rejects a self-link and a nonexistent message id", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+  const id = messageIdByText(db, threadId, "Bob: sounds good see you then");
+
+  assert.throws(() => linkMessages(db, id, id));
+  assert.throws(() => linkMessages(db, id, 999999));
+  assert.throws(() => linkMessages(db, 999999, id));
+
+  db.close();
+});
+
+test("G-20: re-pointing an already-linked message to an unrelated canonical is rejected", () => {
+  const db = freshDb();
+  const threadId = seedCrossStreamThread(db);
+  const a = messageIdByText(db, threadId, "Alice: dinner at 7 tonight, don't be late");
+  const b = messageIdByText(db, threadId, "Alice: dinner at 7");
+  const c = messageIdByText(db, threadId, "Bob: sounds good see you then");
+
+  linkMessages(db, a, b); // b is now a duplicate of a
+  assert.throws(() => linkMessages(db, c, b)); // re-pointing b straight to an unrelated c must fail
+
+  db.close();
+});
+
+test("G-20: a literal '%' in message text does not break the prefix match (no LIKE wildcard involved)", () => {
+  const db = freshDb();
+  reindex(db, [
+    { id: 1, app: "Store", pkg: "com.store", title: "Flash Deals Today", text: "50% off everything", side: null, time: 1_700_000_000_000, source: "noti" },
+    { id: 2, app: "Store", pkg: "com.store", title: "Flash Deals Today", text: "50% off everything today only, hurry", side: "them", time: 1_700_000_010_000, source: "screen" },
+  ]);
+  const threadId = threadIdByName(db, "Flash Deals Today");
+  const pairs = findCrossStreamDuplicates(db, threadId);
+  assert.equal(pairs.length, 1, "the literal-percent prefix pair must still be found");
+  assert.equal(pairs[0].text1, "50% off everything");
 
   db.close();
 });

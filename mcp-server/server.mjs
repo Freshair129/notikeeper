@@ -22,7 +22,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import QRCode from "qrcode";
-import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages, linkThreadAlias } from "./relations.mjs";
+import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages, linkThreadAlias, findCrossStreamDuplicates, linkMessages } from "./relations.mjs";
 import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows, allRawRows } from "./raw-store.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
@@ -1434,6 +1434,60 @@ mcp.tool(
           type: "text",
           text: `Linked: thread ${result.aliasThreadId} now folds into thread ${result.threadId}. ` +
             `thread_summary on ${result.threadId} will include both histories from now on.`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "find_cross_stream_duplicates",
+  {
+    threadId: z.number().describe("Thread id to scan — use thread_summary/list_apps or hql first to find it."),
+    windowMs: z.number().optional().describe("How close in time two messages must be to be considered the same event. Default 180000 (3 minutes)."),
+  },
+  // See G-20 in the capture-to-archive integrity audit: the same real-world
+  // message often lands as two unlinked rows — a notification's preview and
+  // the screen reader's (or scraper's) fuller capture of the same moment.
+  // This only ever SURFACES candidate pairs (different source, close in
+  // time, one message's text a prefix of the other's or identical) for
+  // review — it never asserts they're the same message. Confirm a real pair
+  // with link_messages; a pair that turns out to be two genuinely different
+  // messages just... isn't linked, no action needed.
+  async ({ threadId, windowMs }) => {
+    try {
+      const pairs = findCrossStreamDuplicates(RDB, threadId, windowMs ? { windowMs } : {});
+      if (!pairs.length) return { content: [{ type: "text", text: "no candidate pairs found" }] };
+      const lines = pairs.map((p) =>
+        `#${p.id1} [${p.source1}] "${p.text1}" (${new Date(p.time1).toLocaleString()})\n` +
+        `  ~ #${p.id2} [${p.source2}] "${p.text2}" (${new Date(p.time2).toLocaleString()})`
+      );
+      return { content: [{ type: "text", text: `${pairs.length} candidate pair(s):\n\n${lines.join("\n\n")}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "link_messages",
+  {
+    canonicalId: z.number().describe("Message id to keep as the canonical record of this event."),
+    duplicateId: z.number().describe("The other stream's message id, confirmed to be the same real-world event."),
+    reason: z.string().optional().describe("Why these are the same message, e.g. \"notification preview of the screen-captured message\""),
+  },
+  // Only ever asserted from outside (typically after reviewing
+  // find_cross_stream_duplicates' output) — see G-20. Neither message is
+  // deleted or hidden; this just records the relationship.
+  async ({ canonicalId, duplicateId, reason }) => {
+    try {
+      const result = linkMessages(RDB, canonicalId, duplicateId, reason || null);
+      return {
+        content: [{
+          type: "text",
+          text: `Linked: message ${result.duplicateId} marked as a duplicate capture of message ${result.messageId}. Both rows stay in the archive.`,
         }],
       };
     } catch (e) {

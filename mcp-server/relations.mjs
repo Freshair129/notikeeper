@@ -71,6 +71,24 @@ const UI_PATTERNS = [
   /^หน้าที่ \d+ จาก \d+/,
   /ขยายรูปภาพ$/,
   /(ย้|ย้อ|ย้อน)กลับ$/,                     // unicode-replaced variants of "ย้อนกลับ"
+  /^Send post/i,
+  /^Double tap to/i,
+  /^Button\.?/i,
+  /^Open chat head/i,
+  /^Create group chat/i,
+  /^เห็นเมื่อ \d+/i,
+  /^ส่งเมื่อ \d+/i,
+  /^ใช้งานเมื่อ \d+/i,
+  /^กำลังใช้งาน$/i,
+  /^การโทรด้วยเสียง/i,
+  /^เริ่มการโทร/i,
+  /^คอนเทนเนอร์/i,
+  /^ Replay$/i,
+  /โพสต์ photo \d+/i,
+  /โพสต์ video \d+/i,
+  /^Suggested Photo/i,
+  /^Sponsored Video/i,
+  /^Reel by/i,
 ];
 
 /** True if a label looks like UI chrome — short single line, no message-shape. */
@@ -269,6 +287,34 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_msg_sender      ON messages(sender_id);
     CREATE INDEX IF NOT EXISTS idx_msg_time        ON messages(time);
 
+    -- See G-20 in the capture-to-archive integrity audit: the same
+    -- real-world message often lands as two separate, unlinked rows — a
+    -- notification's preview and the screen reader's (or scraper's) fuller
+    -- capture of the same conversation moment. Reliably telling apart
+    -- "these are the same event, captured twice" from "these are two
+    -- different, genuinely similar messages sent close together" from text
+    -- and timing alone carries real false-positive risk -- linking the
+    -- wrong pair would misrepresent two distinct messages as one. So, same
+    -- discipline as thread_aliases/G-13: nothing here is populated by
+    -- inference. findCrossStreamDuplicates() only ever SURFACES candidate
+    -- pairs for a human (or Claude, asked to look) to judge; linkMessages()
+    -- only ever RECORDS a link once something outside pure text/time
+    -- matching has actually confirmed one. Both rows always keep existing
+    -- independently — this never deletes or merges a message, only marks a
+    -- relationship between two that both stay in the archive as captured.
+    -- ON DELETE CASCADE: if a linked message is ever removed (e.g. a future
+    -- dedup pass), the stale link goes with it rather than either blocking
+    -- the delete or leaving a dangling reference.
+    CREATE TABLE IF NOT EXISTS message_links (
+      message_id   INTEGER NOT NULL, -- canonical message the duplicate folds into
+      duplicate_id INTEGER NOT NULL PRIMARY KEY,
+      reason       TEXT,
+      created_at   INTEGER NOT NULL,
+      FOREIGN KEY (message_id)   REFERENCES messages(id) ON DELETE CASCADE,
+      FOREIGN KEY (duplicate_id) REFERENCES messages(id) ON DELETE CASCADE,
+      CHECK (message_id != duplicate_id)
+    );
+
     -- Lexical (sparse) retrieval over message text. The 'trigram' tokenizer is
     -- the only FTS5 tokenizer that works for Thai/CJK (no whitespace word
     -- boundaries) — it indexes 3-char substrings and ranks with BM25. This is
@@ -433,7 +479,6 @@ function parseRow(r) {
     const m = text.match(SENDER_PREFIX_RE);
     if (m) {
       senderName = m[1].trim();
-      // keep the unstripped text — we want the full content in the archive
     } else {
       senderName = title.trim() || null;
     }
@@ -648,6 +693,92 @@ export function linkThreadAlias(db, canonicalThreadId, aliasThreadId, reason = n
   return { threadId: resolvedCanonical, aliasThreadId };
 }
 
+/**
+ * Finds message pairs in [threadId] that LOOK like the same real-world
+ * message captured twice, once per stream — see G-20 and message_links'
+ * own doc comment in initSchema for why this only ever surfaces candidates,
+ * never asserts a link itself. A pair qualifies when: different sources,
+ * within [windowMs] of each other (default 3 minutes — the same
+ * same-real-world-event granularity graph-index.mjs's buildTurns and
+ * NotiStore.kt's notiDedupKey both already use), and one message's text is
+ * either identical to or a literal prefix of the other's (the common shape
+ * of a notification preview vs. the fuller text a screen/scrape capture
+ * gets — checked with substr/length, not SQL LIKE, so a literal "%" or "_"
+ * in a message can't be misread as a wildcard). Already-linked messages are
+ * excluded, so re-running this after confirming some pairs only surfaces
+ * what's still unresolved.
+ */
+export function findCrossStreamDuplicates(db, threadId, { windowMs = 180_000 } = {}) {
+  return db.prepare(`
+    SELECT m1.id AS id1, m1.source AS source1, m1.text AS text1, m1.time AS time1, m1.side AS side1,
+           m2.id AS id2, m2.source AS source2, m2.text AS text2, m2.time AS time2, m2.side AS side2
+    FROM messages m1
+    JOIN messages m2
+      ON m2.thread_id = m1.thread_id
+      AND m2.id > m1.id
+      AND m2.source != m1.source
+      AND ABS(m2.time - m1.time) <= @windowMs
+    WHERE m1.thread_id = @threadId
+      AND (
+        m1.text = m2.text
+        OR substr(m1.text, 1, length(m2.text)) = m2.text
+        OR substr(m2.text, 1, length(m1.text)) = m1.text
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM message_links WHERE duplicate_id = m1.id OR duplicate_id = m2.id
+      )
+    ORDER BY m1.time
+  `).all({ threadId, windowMs });
+}
+
+/**
+ * Records that [duplicateId] is the same real-world message as
+ * [canonicalId], captured by a different stream — see G-20 and
+ * message_links' own doc comment in initSchema for why this is only ever
+ * asserted from outside (typically after reviewing findCrossStreamDuplicates'
+ * output), never inferred. Both message rows keep existing independently;
+ * nothing is deleted or merged. Same validation and chain-flattening shape
+ * as linkThreadAlias/G-13, adapted for messages instead of threads.
+ */
+export function linkMessages(db, canonicalId, duplicateId, reason = null) {
+  if (canonicalId === duplicateId) {
+    throw new Error("a message cannot be a duplicate of itself");
+  }
+  const exists = (id) => !!db.prepare("SELECT 1 FROM messages WHERE id = ?").get(id);
+  if (!exists(canonicalId)) throw new Error(`no such message: ${canonicalId}`);
+  if (!exists(duplicateId)) throw new Error(`no such message: ${duplicateId}`);
+
+  const isLinkedElsewhere = db
+    .prepare("SELECT message_id FROM message_links WHERE duplicate_id = ?")
+    .get(duplicateId);
+  if (isLinkedElsewhere && isLinkedElsewhere.message_id !== canonicalId) {
+    throw new Error(
+      `message ${duplicateId} is already linked to ${isLinkedElsewhere.message_id} — ` +
+      `link that message instead of re-pointing an existing link`
+    );
+  }
+
+  const targetIsLinked = db
+    .prepare("SELECT message_id FROM message_links WHERE duplicate_id = ?")
+    .get(canonicalId);
+  const resolvedCanonical = targetIsLinked ? targetIsLinked.message_id : canonicalId;
+  if (resolvedCanonical === duplicateId) {
+    throw new Error("linking these messages would create a cycle");
+  }
+
+  db.prepare(`UPDATE message_links SET message_id = ? WHERE message_id = ?`)
+    .run(resolvedCanonical, duplicateId);
+
+  db.prepare(`
+    INSERT INTO message_links(message_id, duplicate_id, reason, created_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(duplicate_id) DO UPDATE SET
+      message_id = excluded.message_id, reason = excluded.reason, created_at = excluded.created_at
+  `).run(resolvedCanonical, duplicateId, reason, Date.now());
+
+  return { messageId: resolvedCanonical, duplicateId };
+}
+
 // ---------- query helpers (used by HTTP endpoints) ----------
 // listThreads excludes threads that are now an alias of another thread (see
 // linkThreadAlias/G-13) — their history is reachable through the canonical
@@ -684,10 +815,17 @@ export function getThread(db, id, { limit = 500 } = {}) {
   const threadIds = [id, ...aliasedIds];
   const placeholders = threadIds.map(() => "?").join(",");
 
+  // duplicateOfId: set when this message has been confirmed (via
+  // linkMessages, never inferred — see G-20) to be another stream's capture
+  // of the same real-world message as some other row here. Neither row is
+  // ever hidden or merged — this only annotates the relationship so a
+  // reader can tell the two apart from two genuinely separate messages.
   const messages = db.prepare(`
     SELECT m.id, m.time, m.source, m.side, m.text, m.reply_to_id, m.time_exact,
-           u.name AS sender
-    FROM messages m LEFT JOIN users u ON u.id = m.sender_id
+           u.name AS sender, ml.message_id AS duplicateOfId
+    FROM messages m
+    LEFT JOIN users u ON u.id = m.sender_id
+    LEFT JOIN message_links ml ON ml.duplicate_id = m.id
     WHERE m.thread_id IN (${placeholders})
     ORDER BY m.time ASC LIMIT ?`).all(...threadIds, limit);
   // GROUP BY u.id: a participant who was in the conversation both before and
