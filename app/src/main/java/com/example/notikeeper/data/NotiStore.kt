@@ -91,28 +91,64 @@ internal fun gapDedupKey(service: String, gapStartMs: Long, gapEndMs: Long): Str
     "gap:$service:$gapStartMs:$gapEndMs"
 
 /**
+ * Builds an FTS5 MATCH expression from free user text — mirrors
+ * relations.mjs's ftsQuery() on the server side exactly (same reasoning:
+ * see its own doc comment). Returns null for text the trigram tokenizer
+ * can't usefully match (under 3 characters — trigram indexes 3-char
+ * substrings). Splits on whitespace and ORs the >=3-char chunks as quoted
+ * phrases; continuous-script text with no spaces (Thai and friends have
+ * none) falls back to matching the whole string as one phrase.
+ */
+internal fun ftsMatchExpr(search: String): String? {
+    val t = search.trim()
+    if (t.length < 3) return null
+    fun phrase(w: String) = "\"" + w.replace("\"", "\"\"") + "\""
+    val parts = t.split(Regex("\\s+")).filter { it.length >= 3 }
+    val terms = (parts.ifEmpty { listOf(t) }).map { phrase(it) }
+    return terms.joinToString(" OR ")
+}
+
+/**
  * Builds the SQL + bind args for [NotiStore.query] — pulled out as a pure
  * function (no SQLiteDatabase involved) so the keyset-pagination logic (see
  * G-18) is unit-testable without a device, same reasoning as the dedupKey
  * builders above. `$ITEM_COLUMNS`/`NotiStore.QUERY_LIMIT` are interpolated
  * directly (never user input), only `search`/`before` ever become bind args.
+ *
+ * [hasFts] gates the FTS5 path entirely — false (the default) reproduces
+ * the exact plain-LIKE query this function always built, byte for byte.
+ * When true and [search] is long enough to produce a real FTS5 match
+ * expression, the query narrows through `notifications_fts` first (a real
+ * index) instead of scanning every row with LIKE. A short search (under 3
+ * chars) still falls back to LIKE even with FTS available — trigram can't
+ * usefully match that little text anyway, and LIKE handles it correctly.
  */
-internal fun buildQuerySql(search: String, before: Pair<Long, Long>?): Pair<String, Array<String>> {
+internal fun buildQuerySql(search: String, before: Pair<Long, Long>?, hasFts: Boolean = false): Pair<String, Array<String>> {
     val cursorClause = if (before != null) "(postTime < ? OR (postTime = ? AND id < ?))" else null
     val cursorArgs: (List<String>) -> List<String> = { base ->
         if (before != null) base + listOf(before.first.toString(), before.first.toString(), before.second.toString())
         else base
     }
-    return if (search.isBlank()) {
-        val where = cursorClause?.let { "WHERE $it" } ?: ""
-        "SELECT $ITEM_COLUMNS FROM notifications $where " +
-            "ORDER BY postTime DESC, id DESC LIMIT ${NotiStore.QUERY_LIMIT}" to cursorArgs(emptyList()).toTypedArray()
-    } else {
-        val like = "%$search%"
-        val extra = cursorClause?.let { " AND $it" } ?: ""
-        "SELECT $ITEM_COLUMNS FROM notifications " +
-            "WHERE (appName LIKE ? OR title LIKE ? OR text LIKE ?)$extra " +
-            "ORDER BY postTime DESC, id DESC LIMIT ${NotiStore.QUERY_LIMIT}" to cursorArgs(listOf(like, like, like)).toTypedArray()
+    val ftsExpr = if (hasFts) ftsMatchExpr(search) else null
+    return when {
+        search.isBlank() -> {
+            val where = cursorClause?.let { "WHERE $it" } ?: ""
+            "SELECT $ITEM_COLUMNS FROM notifications $where " +
+                "ORDER BY postTime DESC, id DESC LIMIT ${NotiStore.QUERY_LIMIT}" to cursorArgs(emptyList()).toTypedArray()
+        }
+        ftsExpr != null -> {
+            val extra = cursorClause?.let { " AND $it" } ?: ""
+            "SELECT $ITEM_COLUMNS FROM notifications " +
+                "WHERE id IN (SELECT rowid FROM notifications_fts WHERE notifications_fts MATCH ?)$extra " +
+                "ORDER BY postTime DESC, id DESC LIMIT ${NotiStore.QUERY_LIMIT}" to cursorArgs(listOf(ftsExpr)).toTypedArray()
+        }
+        else -> {
+            val like = "%$search%"
+            val extra = cursorClause?.let { " AND $it" } ?: ""
+            "SELECT $ITEM_COLUMNS FROM notifications " +
+                "WHERE (appName LIKE ? OR title LIKE ? OR text LIKE ?)$extra " +
+                "ORDER BY postTime DESC, id DESC LIMIT ${NotiStore.QUERY_LIMIT}" to cursorArgs(listOf(like, like, like)).toTypedArray()
+        }
     }
 }
 
@@ -124,7 +160,7 @@ internal fun buildQuerySql(search: String, before: Pair<Long, Long>?): Pair<Stri
 class NotiStore private constructor(
     context: Context,
     private val passphrase: String
-) : SQLiteOpenHelper(context.applicationContext, "noti.db", null, 3) {
+) : SQLiteOpenHelper(context.applicationContext, "noti.db", null, 4) {
 
     // SQLiteOpenHelper doesn't expose the context it was built with, and
     // onUpgrade/backupBeforeMigration need one — retained explicitly rather
@@ -152,6 +188,67 @@ class NotiStore private constructor(
         )
         db.execSQL("CREATE UNIQUE INDEX idx_dedup ON notifications(dedupKey)")
         db.execSQL("CREATE INDEX idx_time ON notifications(postTime)")
+        setupFts(db)
+    }
+
+    /**
+     * G-18 in the capture-to-archive integrity audit: search was an
+     * unindexed `LIKE '%q%'` scan — Wave 6/14 added debounce and real
+     * pagination, but the scan itself was never indexed. FTS5's trigram
+     * tokenizer is what relations.mjs already uses server-side for the same
+     * Thai/CJK-no-word-spaces reason (see its own doc comment).
+     *
+     * This is wrapped in a try/catch and never allowed to propagate: whether
+     * this exact SQLCipher-for-Android build (net.zetetic:
+     * android-database-sqlcipher:4.5.4) actually has FTS5 compiled in could
+     * not be confirmed with certainty without a device to test against —
+     * research turned up conflicting signals (the build's own makefile is
+     * supposed to enable it, but a documented upstream issue shows "no such
+     * module: fts5" occurring in practice on this exact library despite
+     * that flag). Rather than gate the fix on certainty this session has no
+     * way to obtain, or risk every install failing to open its database on
+     * upgrade if the assumption is wrong, this fails soft: if FTS5 truly
+     * isn't available, this throws, gets caught, and [query] simply never
+     * finds [hasFts] true — search stays on the exact LIKE scan it's always
+     * used, functionally unchanged, not broken.
+     */
+    private fun setupFts(db: SQLiteDatabase) {
+        runCatching {
+            db.execSQL(
+                """CREATE VIRTUAL TABLE IF NOT EXISTS notifications_fts USING fts5(
+                     text, title, appName,
+                     content='notifications',
+                     content_rowid='id',
+                     tokenize='trigram'
+                   )"""
+            )
+            db.execSQL(
+                """CREATE TRIGGER IF NOT EXISTS notifications_fts_ai AFTER INSERT ON notifications BEGIN
+                     INSERT INTO notifications_fts(rowid, text, title, appName)
+                       VALUES (new.id, new.text, new.title, new.appName);
+                   END"""
+            )
+            db.execSQL(
+                """CREATE TRIGGER IF NOT EXISTS notifications_fts_ad AFTER DELETE ON notifications BEGIN
+                     INSERT INTO notifications_fts(notifications_fts, rowid, text, title, appName)
+                       VALUES('delete', old.id, old.text, old.title, old.appName);
+                   END"""
+            )
+            db.execSQL(
+                """CREATE TRIGGER IF NOT EXISTS notifications_fts_au AFTER UPDATE ON notifications BEGIN
+                     INSERT INTO notifications_fts(notifications_fts, rowid, text, title, appName)
+                       VALUES('delete', old.id, old.text, old.title, old.appName);
+                     INSERT INTO notifications_fts(rowid, text, title, appName)
+                       VALUES (new.id, new.text, new.title, new.appName);
+                   END"""
+            )
+            // Backfill for rows that existed before the index did (onUpgrade's
+            // v3->v4 path; a no-op harmless extra call from onCreate, where
+            // there's nothing to backfill yet).
+            db.execSQL("INSERT INTO notifications_fts(notifications_fts) VALUES('rebuild')")
+        }.onFailure {
+            android.util.Log.w("NotiStore", "FTS5 unavailable on this build — search stays on the LIKE scan", it)
+        }
     }
 
     // The phone is becoming a capture buffer whose rows must survive schema
@@ -202,6 +299,15 @@ class NotiStore private constructor(
             } finally {
                 db.endTransaction()
             }
+        }
+        // version 3 -> 4: FTS5 search index (see G-18 / setupFts's own doc
+        // comment for why this is entirely best-effort and never blocks the
+        // upgrade). Deliberately NOT inside the v2->v3 transaction above —
+        // setupFts already guards its own failure internally, and an FTS5
+        // problem must never roll back the columns/backfill that DID
+        // succeed for a device upgrading straight from v2.
+        if (oldVersion < 4) {
+            setupFts(db)
         }
     }
 
@@ -409,16 +515,44 @@ class NotiStore private constructor(
      * capture-to-archive integrity audit flagged "no pagination" as a
      * separate problem from the unindexed LIKE scan itself, and one that
      * doesn't need a schema change to fix — this is the additive half of
-     * that finding; the FTS-index half is still deferred (see FeedScreen.kt).
+     * that finding. The FTS5 index (see [hasFts]/setupFts) is the other
+     * half: gated behind a runtime check rather than assumed, since this
+     * exact SQLCipher build's FTS5 support couldn't be confirmed without a
+     * device (see setupFts's doc comment) — a short or FTS-unavailable
+     * search transparently falls back to the same LIKE scan this always
+     * did, so there's no behavior this can regress, only a speedup it may
+     * or may not actually get depending on the build it's running on.
      */
     fun query(search: String, before: Pair<Long, Long>? = null): List<NotiItem> {
-        val (sql, args) = buildQuerySql(search, before)
-        val cursor = database.rawQuery(sql, args)
+        val (sql, args) = buildQuerySql(search, before, hasFts)
+        val cursor = try {
+            database.rawQuery(sql, args)
+        } catch (e: SQLiteException) {
+            // Belt and suspenders beyond hasFts itself: the FTS5 table existing
+            // (what hasFts checks) doesn't guarantee every MATCH query against
+            // it succeeds on every build. Fall back to the plain LIKE query
+            // for this one call rather than the search breaking outright.
+            android.util.Log.w("NotiStore", "FTS query failed, falling back to LIKE", e)
+            val (fallbackSql, fallbackArgs) = buildQuerySql(search, before, hasFts = false)
+            database.rawQuery(fallbackSql, fallbackArgs)
+        }
         val result = ArrayList<NotiItem>()
         cursor.use {
             while (it.moveToNext()) result.add(cursorToNotiItem(it))
         }
         return result
+    }
+
+    /** Whether this database actually has the FTS5 search index — checked once
+     *  per [NotiStore] instance (a fresh check on every query would defeat
+     *  the point of avoiding a scan). See setupFts's doc comment for why
+     *  this can legitimately be false even on a fully migrated database. */
+    private val hasFts: Boolean by lazy {
+        runCatching {
+            database.rawQuery(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications_fts'", null
+            ).use { it.moveToFirst() }
+        }.getOrDefault(false)
     }
 
     /**

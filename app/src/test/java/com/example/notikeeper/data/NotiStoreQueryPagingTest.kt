@@ -63,4 +63,63 @@ class NotiStoreQueryPagingTest {
         val (sql, _) = buildQuerySql("anything", before = Pair(1L, 2L))
         assertTrue(sql.contains("LIMIT ${NotiStore.QUERY_LIMIT}"))
     }
+
+    // ---------- hasFts = false (default) must never change — G-18's FTS index ----------
+
+    @Test
+    fun `hasFts defaults to false -- omitting it reproduces the exact plain-LIKE query`() {
+        val withDefault = buildQuerySql("hello", before = Pair(1L, 2L))
+        val withExplicitFalse = buildQuerySql("hello", before = Pair(1L, 2L), hasFts = false)
+        assertEquals(withExplicitFalse.first, withDefault.first)
+        assertEquals(withExplicitFalse.second.toList(), withDefault.second.toList())
+        assertTrue("must still be the LIKE query, not FTS", withDefault.first.contains("LIKE ?"))
+    }
+
+    // ---------- hasFts = true ----------
+
+    @Test
+    fun `hasFts true, search long enough -- queries through notifications_fts, not LIKE`() {
+        val (sql, args) = buildQuerySql("hello", before = null, hasFts = true)
+        assertTrue(sql.contains("WHERE id IN (SELECT rowid FROM notifications_fts WHERE notifications_fts MATCH ?)"))
+        assertFalse("must not also carry the LIKE clause", sql.contains("LIKE"))
+        assertEquals(listOf("\"hello\""), args.toList())
+    }
+
+    @Test
+    fun `hasFts true, search under 3 chars -- falls back to LIKE, trigram can't match that little text`() {
+        val (sql, args) = buildQuerySql("hi", before = null, hasFts = true)
+        assertTrue(sql.contains("WHERE (appName LIKE ? OR title LIKE ? OR text LIKE ?)"))
+        assertEquals(listOf("%hi%", "%hi%", "%hi%"), args.toList())
+    }
+
+    @Test
+    fun `hasFts true, blank search -- no WHERE at all, same as hasFts false`() {
+        val (sql, args) = buildQuerySql("", before = null, hasFts = true)
+        assertFalse(sql.contains("WHERE"))
+        assertEquals(0, args.size)
+    }
+
+    @Test
+    fun `hasFts true with a cursor -- FTS clause and keyset clause are ANDed, args in matching order`() {
+        val (sql, args) = buildQuerySql("hello", before = Pair(1_700_000_000_000L, 42L), hasFts = true)
+        assertTrue(sql.contains(
+            "WHERE id IN (SELECT rowid FROM notifications_fts WHERE notifications_fts MATCH ?) " +
+                "AND (postTime < ? OR (postTime = ? AND id < ?))"
+        ))
+        assertEquals(listOf("\"hello\"", "1700000000000", "1700000000000", "42"), args.toList())
+    }
+
+    @Test
+    fun `hasFts true, multi-word search -- each 3+ char word becomes its own quoted OR'd phrase`() {
+        val (_, args) = buildQuerySql("the dinner party", before = null, hasFts = true)
+        // "the" is under 3 chars once trimmed? no -- "the" is 3 chars, kept. All three qualify.
+        assertEquals(listOf("\"the\" OR \"dinner\" OR \"party\""), args.toList())
+    }
+
+    @Test
+    fun `hasFts true, short words filtered but long ones kept`() {
+        val (_, args) = buildQuerySql("is it dinner", before = null, hasFts = true)
+        // "is" (2 chars) and "it" (2 chars) dropped; "dinner" (6 chars) kept.
+        assertEquals(listOf("\"dinner\""), args.toList())
+    }
 }
