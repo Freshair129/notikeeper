@@ -30,7 +30,15 @@ app/src/main/
     ├── MainActivity.kt           # UI (Compose) — ค้นหา/อ่าน + ปุ่มเปิดสิทธิ์
     ├── NotiLoggerService.kt      # ดักจับการแจ้งเตือนทุกแอป
     ├── MessengerReaderService.kt # อ่านบทสนทนาบนจอ Messenger
-    └── data/NotiStore.kt         # ฐานข้อมูล SQLite (กันข้อมูลซ้ำด้วย dedupKey)
+    ├── Speaker.kt                # อ่านออกเสียง (TTS)
+    ├── Updater.kt                # เช็ค/ดาวน์โหลดอัปเดตเอง
+    ├── Exporter.kt                # ส่งออก/อัปโหลด/แชร์ข้อมูล
+    ├── screens/                  # DashboardScreen, FeedScreen, SettingsScreen, ThreadsScreen
+    └── data/
+        ├── NotiStore.kt          # ฐานข้อมูล SQLCipher (กันข้อมูลซ้ำด้วย dedupKey)
+        ├── DbKey.kt               # กุญแจเข้ารหัสฐานข้อมูล (แยกเก็บจาก settings ทั่วไป)
+        ├── SecureStore.kt         # ที่เก็บ settings แบบเข้ารหัส (Android Keystore โดยตรง)
+        └── Settings.kt            # การตั้งค่าแอป (whitelist แจ้งเตือน/อ่านออกเสียง ฯลฯ)
 ```
 
 ---
@@ -104,7 +112,10 @@ app.run(host="0.0.0.0", port=8000)   # endpoint = http://<ไอพีคอม>
 ## ความปลอดภัย / ความเป็นส่วนตัว
 - ข้อมูลทั้งหมดอยู่ในไฟล์ `noti.db` ในเครื่องคุณคนเดียว **ไม่มีการส่งออกเน็ต** ไม่มีเซิร์ฟเวอร์ ไม่มีโฆษณา
 - **เข้ารหัสทั้งไฟล์ด้วย SQLCipher (AES-256)** — ถ้าใครก๊อปไฟล์ออกไป (root/backup) จะอ่านไม่ออก
-- **กุญแจเก็บใน Android Keystore** (ผ่าน EncryptedSharedPreferences) — service เปิด db เองได้ กุญแจไม่โผล่เป็น plaintext
+- **กุญแจเก็บใน Android Keystore โดยตรง** (ผ่าน `SecureStore` ของแอปเอง ไม่ใช้
+  `EncryptedSharedPreferences` ที่ Google เลิกอัปเดตแล้ว) — แยกเก็บกุญแจฐานข้อมูล
+  ออกจาก settings ทั่วไปคนละที่ ถ้า settings เสียหาย กุญแจฐานข้อมูลไม่หายตาม —
+  service เปิด db เองได้ กุญแจไม่โผล่เป็น plaintext
 - **ล็อกหน้าแอปด้วยลายนิ้วมือ / PIN เครื่อง** ทุกครั้งที่เปิด (และล็อกใหม่ทุกครั้งที่ออกจากแอป)
 
 > ⚠️ การล็อกแอปจะทำงานก็ต่อเมื่อ **เครื่องตั้งล็อกหน้าจอ (PIN/รูปแบบ/ลายนิ้วมือ) ไว้แล้ว**

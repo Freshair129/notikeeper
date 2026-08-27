@@ -37,6 +37,8 @@
                           │ – ingest endpoint         │    └──────────────────────────┘
                           │ – Claude tools:           │
                           │   search/recent/list/stats│
+                          │   /semantic/similar/graph │
+                          │   /hql/summary/link/dedup │
                           └───────────────────────────┘
 ```
 
