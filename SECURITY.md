@@ -11,9 +11,12 @@ limit, etc.). Everything below is reasoned against that scope.
 - **Casual pickup of the phone** while unlocked → biometric app lock.
 - **Forensic file-grab from a rooted phone, ADB backup, or stolen device
   storage** → whole-DB encryption (SQLCipher / AES-256).
-- **The DB passphrase leaking from disk** → key held in
-  `EncryptedSharedPreferences`, master key in the Android Keystore
-  (hardware-backed where available).
+- **The DB passphrase leaking from disk** → key held in `SecureStore`, a
+  direct-Keystore AES-256-GCM store (replacing the deprecated
+  `androidx.security:security-crypto`/`EncryptedSharedPreferences`, which
+  Google stopped releasing past 1.1.0). The passphrase lives in its own
+  isolated file/Keystore alias, separate from the app's other settings, so a
+  decrypt failure on one doesn't take down the other.
 - **Accidental data egress** → no telemetry, no analytics, no third-party
   SDKs. The only network traffic is the user-configured upload endpoint
   and the update check.
@@ -34,8 +37,8 @@ limit, etc.). Everything below is reasoned against that scope.
 | Layer | What | How |
 |---|---|---|
 | At rest | `noti.db` file | SQLCipher 4.x, AES-256 in CBC + HMAC-SHA512, default KDF iterations |
-| Key storage | 32-byte random passphrase | `EncryptedSharedPreferences` (AES256_GCM values, AES256_SIV keys) |
-| Master key | wraps the prefs file | Android `MasterKey` (`AES256_GCM`), hardware-backed via Keystore where available |
+| Key storage | 32-byte random passphrase | `SecureStore`, direct Android Keystore AES-256-GCM, its own isolated file/alias |
+| Master key | wraps the passphrase value | Android Keystore secret key (`AES-256`, `AndroidKeyStore` provider), hardware-backed where available |
 | UI gate | biometric / device credential | `BiometricPrompt` with `BIOMETRIC_STRONG \| DEVICE_CREDENTIAL` |
 
 **Why the passphrase is not user-derived.** The background capture services

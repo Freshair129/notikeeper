@@ -21,14 +21,12 @@ import http from "node:http";
 import https from "node:https";
 import crypto from "node:crypto";
 import { decodeXmlEntities, sleep } from "./adb-lib.mjs";
-import { DEFAULT_INGEST_URL } from "./config.mjs";
+import { DEFAULT_INGEST_URL, INGEST_TOKEN } from "./config.mjs";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 const INGEST_URL   = process.env.INGEST_URL || DEFAULT_INGEST_URL;
-const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 const PKG          = "com.facebook.orca";
 const APP_NAME     = "Messenger";
-const SCREEN_W     = 720;   // Samsung A07 (SM-A075F)
 
 // How many consecutive scrolls with zero new messages before we stop.
 const IDLE_SCROLL_LIMIT = 4;
@@ -91,6 +89,40 @@ function adbDump() {
   return adb("uiautomator dump /sdcard/nk_dump.xml >/dev/null 2>&1 && cat /sdcard/nk_dump.xml", {
     timeout: 18000,
   });
+}
+
+/**
+ * Real device screen width, queried once via `adb shell wm size` instead of
+ * hardcoded to one specific handset (was: Samsung A07 / SM-A075F) — see G-15
+ * in the capture-to-archive integrity audit. Falls back to that same value
+ * only if the query fails or its output doesn't parse, so a hiccup degrades
+ * to the old behavior rather than crashing the scraper outright.
+ */
+function resolveScreenWidth() {
+  try {
+    const out = adb("wm size", { optional: true });
+    // Prefer "Override size" (an actively applied custom resolution) over
+    // "Physical size" when both are present.
+    const m = /Override size:\s*(\d+)x(\d+)/.exec(out) || /Physical size:\s*(\d+)x(\d+)/.exec(out);
+    if (m) return parseInt(m[1], 10);
+  } catch { /* fall through to the default below */ }
+  return 720;
+}
+const SCREEN_W = resolveScreenWidth();
+
+/**
+ * Same design as MessengerReaderService.kt's sideOf on the phone (see G-15 in
+ * the capture-to-archive integrity audit): a bubble too close to center to
+ * call confidently returns "" (unknown) instead of a forced guess. No RTL
+ * handling here — unlike the on-device service, this scraper has no reliable
+ * signal for the phone's layout direction from a raw uiautomator XML dump
+ * alone, so that half of G-15 is scoped to the on-device path only.
+ */
+function sideOf(cx, screenW) {
+  const fraction = cx / screenW;
+  if (fraction > 0.60) return "me";
+  if (fraction < 0.50) return "them";
+  return "";
 }
 
 
@@ -359,7 +391,7 @@ function extractMessages(xml, currentTimeMs) {
     if (DOUBLE_TAP_RE.test(raw)) {
       const text = cleanMsgDesc(raw);
       if (!text || text.length < 1 || isChrome(text)) continue;
-      const side = n.cx > SCREEN_W * 0.55 ? "me" : "them";
+      const side = sideOf(n.cx, SCREEN_W);
       msgEvents.push({ text, side, cy: n.cy });
     }
   }
@@ -384,7 +416,7 @@ function extractMessages(xml, currentTimeMs) {
 
 // ── Scrape one thread (phone already has it open) ─────────────────────────────
 async function scrapeCurrentThread() {
-  const seen   = new Set();   // key = text|side|dayBucket
+  const seen   = new Set();   // key = text|side|5-minute time bucket
   const result = [];          // { text, side, time }
   let idleScrolls = 0;
   let scrollCount = 0;
@@ -400,8 +432,16 @@ async function scrapeCurrentThread() {
 
     let newThisRound = 0;
     for (const msg of messages) {
-      const day = Math.floor(msg.time / 86400000);
-      const key = `${msg.text}|${msg.side}|${day}`;
+      // Exists to stop the SAME on-screen bubble being re-collected as the
+      // scraper scrolls back over it — a full calendar day was far coarser
+      // than that actual case needs, and it silently swallowed a real, later
+      // occurrence of the identical short text on the same day. 5 minutes
+      // (the same "same real-world event" granularity buildTurns in
+      // graph-index.mjs already uses) still catches a re-render seconds apart
+      // during one scroll pass without erasing a genuine repeat sent hours
+      // apart — see G-35 in the capture-to-archive integrity audit.
+      const bucket = Math.floor(msg.time / (5 * 60 * 1000));
+      const key = `${msg.text}|${msg.side}|${bucket}`;
       if (seen.has(key)) continue;
       seen.add(key);
       result.push({ ...msg, convo });

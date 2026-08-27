@@ -67,6 +67,24 @@ class MessengerReaderService : AccessibilityService() {
 
     private var lastCaptureAt = 0L
 
+    /**
+     * Fires whenever the system (re)binds this accessibility service — first
+     * launch, after the user re-enables it, after an OEM battery killer or a
+     * crash releases it, after reboot. Same gap-detection approach as
+     * NotiLoggerService.onListenerConnected — see its doc comment for why
+     * retroactive detection at reconnection, not a disconnect hook, is the
+     * robust choice here (G-28/G-29).
+     */
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        scope.launch {
+            val ctx = applicationContext
+            val last = com.example.notikeeper.data.Settings.getLastScreenHeartbeat(ctx)
+            val now = NotiStore.get(ctx).recordGapIfAny("screen", last)
+            com.example.notikeeper.data.Settings.setLastScreenHeartbeat(ctx, now)
+        }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString() ?: return
@@ -85,9 +103,10 @@ class MessengerReaderService : AccessibilityService() {
 
         val root = rootInActiveWindow ?: return
         val width = resources.displayMetrics.widthPixels
+        val isRtl = resources.configuration.layoutDirection == android.view.View.LAYOUT_DIRECTION_RTL
         val lines = ArrayList<Line>()
         try {
-            collect(root, width, lines)
+            collect(root, width, isRtl, lines)
         } finally {
             @Suppress("DEPRECATION") root.recycle()
         }
@@ -115,7 +134,12 @@ class MessengerReaderService : AccessibilityService() {
             fresh.add(ScreenRow(pkg, appLabel(pkg), convo, l.text, l.side, now))
         }
         if (fresh.isEmpty()) return
-        scope.launch { NotiStore.get(applicationContext).insertScreenBatch(fresh) }
+        scope.launch {
+            val ctx = applicationContext
+            NotiStore.get(ctx).insertScreenBatch(fresh)
+            // Proof of life for the gap check in onServiceConnected.
+            com.example.notikeeper.data.Settings.setLastScreenHeartbeat(ctx, System.currentTimeMillis())
+        }
 
         // Eyes-free driving mode: read newly-seen lines aloud (only for whitelisted apps).
         if (com.example.notikeeper.data.Settings.getReadAloudScreen(applicationContext) &&
@@ -128,7 +152,7 @@ class MessengerReaderService : AccessibilityService() {
     private data class Line(val text: String, val top: Int, val side: String)
 
     /** Depth-first walk: collect every node that renders text or has a description. */
-    private fun collect(node: AccessibilityNodeInfo?, width: Int, out: MutableList<Line>) {
+    private fun collect(node: AccessibilityNodeInfo?, width: Int, isRtl: Boolean, out: MutableList<Line>) {
         node ?: return
         val cls = node.className?.toString()
         if (cls == null || cls !in chromeClasses) {
@@ -140,15 +164,35 @@ class MessengerReaderService : AccessibilityService() {
             if (raw != null && raw.length in 1..2000 && !isIconButton) {
                 val bounds = Rect()
                 node.getBoundsInScreen(bounds)
-                // Right-aligned bubbles are usually the user's own messages.
-                val side = if (bounds.centerX() > width * 0.55) "me" else "them"
-                out.add(Line(raw, bounds.top, side))
+                out.add(Line(raw, bounds.top, sideOf(bounds.centerX(), width, isRtl)))
             }
         }
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
-            collect(child, width, out)
+            collect(child, width, isRtl, out)
             @Suppress("DEPRECATION") child?.recycle()
+        }
+    }
+
+    /**
+     * Infers which side of the conversation a bubble belongs to from its
+     * horizontal position. "Me" bubbles sit toward the trailing edge — right
+     * in an LTR layout, left in RTL (Arabic, Hebrew, ...); using raw
+     * centerX-over-width without checking layout direction meant every RTL
+     * capture had this backwards. A position too close to center to call
+     * confidently returns "" (unknown, not a forced guess) rather than
+     * asserting a side with no real evidence behind it — see G-15 in the
+     * capture-to-archive integrity audit. The uncertain band is centered on
+     * 0.55, this service's original empirically-tuned cutoff, rather than
+     * discarding that tuning outright.
+     */
+    private fun sideOf(centerX: Int, width: Int, isRtl: Boolean): String {
+        val fraction = centerX.toFloat() / width
+        val trailingFraction = if (isRtl) 1f - fraction else fraction
+        return when {
+            trailingFraction > 0.60f -> "me"
+            trailingFraction < 0.50f -> "them"
+            else -> ""
         }
     }
 

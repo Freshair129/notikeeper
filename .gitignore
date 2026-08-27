@@ -8,6 +8,12 @@ local.properties
 *.keystore
 captures/
 
+# Encrypted DB pulled off the phone for inspection — never commit
+noti.db
+noti.db-journal
+noti.db-wal
+noti.db-shm
+
 # Node (MCP server)
 mcp-server/node_modules/
 mcp-server/data.jsonl
@@ -19,6 +25,9 @@ mcp-server/relations.db-wal
 mcp-server/relations.db.*
 mcp-server/relations.db-shm.*
 mcp-server/relations.db-wal.*
+mcp-server/raw.db
+mcp-server/raw.db-shm
+mcp-server/raw.db-wal
 mcp-server/graph.db/
 mcp-server/graph.db
 mcp-server/graph.db-shm
@@ -26,6 +35,8 @@ mcp-server/graph.db-wal
 mcp-server/turns.json
 mcp-server/chatlog/
 mcp-server/dedup-removed.jsonl
+mcp-server/yuzup_raw.json
+mcp-server/.notikeeper-token
 mcp-server/_*.log
 
 # Landing page (Vite)

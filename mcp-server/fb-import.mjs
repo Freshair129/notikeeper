@@ -25,10 +25,9 @@ import fs   from "node:fs";
 import path from "node:path";
 import http  from "node:http";
 import https from "node:https";
-import { DEFAULT_INGEST_URL } from "./config.mjs";
+import { DEFAULT_INGEST_URL, INGEST_TOKEN } from "./config.mjs";
 
 const INGEST_URL   = process.env.INGEST_URL   || DEFAULT_INGEST_URL;
-const INGEST_TOKEN = process.env.INGEST_TOKEN || "";
 const APP_NAME     = "Messenger";
 const PKG          = "com.facebook.orca";
 

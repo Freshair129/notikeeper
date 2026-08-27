@@ -22,50 +22,89 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import QRCode from "qrcode";
-import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages } from "./relations.mjs";
+import { openDb, reindex, listThreads, getThread, listUsers, statsSummary, deleteMessages, linkThreadAlias, findCrossStreamDuplicates, linkMessages } from "./relations.mjs";
+import { openRawDb, insertRawRow, insertRawRows, deleteRawRows, countRawRows, filterRawRows, allRawRows } from "./raw-store.mjs";
 import { rebuildFromSqlite as rebuildGraph, neighbors as graphNeighbors,
          executeHql as graphHql, statusSync as graphStatus,
          embedMessages, searchSemantic, searchHybridRRF } from "./graph-index.mjs";
 import { runGate } from "./llm-gate.mjs";
-import { BIND_HOST, LOCALHOST, LOOPBACK_HOST, PORT } from "./config.mjs";
+import crypto from "node:crypto";
+import { BIND_HOST, IS_LOOPBACK_ONLY, LOCALHOST, LOOPBACK_HOST, PORT, TOKEN_FILE, readLocalToken } from "./config.mjs";
 import { classifyNoise } from "./noise.mjs";
+
+// Defined here, ahead of the rest of the ingest/dedup machinery below,
+// because dedupCleanup() needs it at module load time — startup runs a
+// dedup pass before the server is otherwise ready, so this can't wait until
+// wherever it's next convenient to declare a `const`.
+const isNoise = (r) => classifyNoise(r) !== null;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_FILE = process.env.NOTIKEEPER_DATA || path.join(__dirname, "data.jsonl");
 const DASHBOARD_FILE = path.join(__dirname, "dashboard.html");
 const CHATLOG_DIR = path.join(__dirname, "chatlog");
-const TOKEN = process.env.NOTIKEEPER_TOKEN || "";
+/**
+ * Auth token for /ingest and the read APIs.
+ *
+ * Resolution mirrors the scrapers: environment, then the shared token file, then
+ * generate and persist one. The result is never empty, which is the point — the
+ * gates below used to be written `if (TOKEN && ...)`, so an unset token disabled
+ * authentication rather than denying access. Any server started outside the
+ * launchers therefore served the whole archive to anything that could reach the
+ * port. Failing closed means the worst case is "pair the phone again", not
+ * "the archive was readable by the network".
+ */
+function resolveOrCreateToken() {
+  const fromEnv = (process.env.NOTIKEEPER_TOKEN || "").trim();
+  if (fromEnv) return fromEnv;
+
+  const fromFile = readLocalToken();
+  if (fromFile) return fromFile;
+
+  const generated = crypto.randomBytes(32).toString("base64url");
+  try {
+    fs.writeFileSync(TOKEN_FILE, generated, { encoding: "utf8", mode: 0o600 });
+    console.error(`[notikeeper-mcp] generated a new API token: ${TOKEN_FILE}`);
+    console.error("[notikeeper-mcp] re-pair the phone so it picks up the new token.");
+  } catch (e) {
+    console.error(`[notikeeper-mcp] WARNING: could not persist a token (${e.message}).`);
+    console.error("[notikeeper-mcp] WARNING: using an in-memory token - it changes on every restart.");
+  }
+  return generated;
+}
+
+const TOKEN = resolveOrCreateToken();
 const CONFIG_FILE = path.join(__dirname, "config.json");
 
 // Shared mobile config: the capture-app whitelist pushed to the phone via QR
 // pairing, and the last device seen at /ingest (both surfaced on the dashboard).
-let CONFIG = { captureApps: [], lastDevice: null };
+let CONFIG = { captureApps: [], lastDevice: null, ignoredNames: ["LV177"] };
 try {
   if (fs.existsSync(CONFIG_FILE)) {
     const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
     if (Array.isArray(parsed.captureApps)) CONFIG.captureApps = parsed.captureApps;
     if (parsed.lastDevice) CONFIG.lastDevice = parsed.lastDevice;
+    if (Array.isArray(parsed.ignoredNames)) CONFIG.ignoredNames = parsed.ignoredNames;
   }
 } catch (e) { console.error("[notikeeper-mcp] config load failed:", e.message); }
 function saveConfig() {
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(CONFIG, null, 2));
 }
 
-const rows = [];
+// `rows` (a permanently-resident array of every captured row, growing
+// forever) is gone — see G-19 in the capture-to-archive integrity audit.
+// `seen` stays: it's the ingest-time durability gate (see ingest()'s own
+// doc comment) and needs to answer "have I durably stored this raw_key"
+// synchronously and unconditionally on every /ingest call. Making that
+// check depend on a query against raw.db instead — a *second* store,
+// populated by a write that's allowed to fail without blocking the
+// response (see the try/catch around insertRawRows below) — would mean a
+// raw.db-specific hiccup could make an already-durable row look "new"
+// again on resubmission, re-appending an actual duplicate into data.jsonl.
+// `seen` is a Set of short string keys, not full row objects — the memory
+// cost this whole file's `rows` array carried was the full objects, not
+// the keys; keeping just the keys resident is the safe, small trade-off.
 const seen = new Set();
 const keyOf = (r) => `${r.id}-${r.time}`;
-// Max valid `id` across a batch of rows — used to build the /ingest ack
-// high-water mark (Phase 1 of docs/ARCHITECTURE_CHANGE_REQUEST.md). Returns
-// null if the batch has no rows with a usable numeric id.
-const maxId = (arr) => {
-  let m = null;
-  for (const r of arr) {
-    if (r == null || r.id == null) continue;
-    const n = Number(r.id);
-    if (!Number.isNaN(n) && (m === null || n > m)) m = n;
-  }
-  return m;
-};
 
 /** Live SSE subscribers (browsers watching the dashboard). */
 const sseClients = new Set();
@@ -76,43 +115,171 @@ function broadcast(event, payload) {
   }
 }
 
-function load() {
-  if (!fs.existsSync(DATA_FILE)) return;
+/**
+ * Parses every line of DATA_FILE into an object, skipping blank/malformed
+ * lines. No dedup against `seen` here — data.jsonl itself should never
+ * contain two lines with the same raw_key (ingest() never durably writes a
+ * duplicate in the first place), so a plain parse is already correct.
+ * Callers that need dedup-against-`seen` semantics (just load(), below, the
+ * one-time startup bootstrap) do that themselves.
+ */
+function parseDataFile() {
+  if (!fs.existsSync(DATA_FILE)) return [];
+  const out = [];
   for (const line of fs.readFileSync(DATA_FILE, "utf8").split("\n")) {
     const t = line.trim();
     if (!t) continue;
+    try { out.push(JSON.parse(t)); } catch { /* skip */ }
+  }
+  return out;
+}
+
+/**
+ * One-time startup bootstrap: parses DATA_FILE, populates `seen` from every
+ * row found (deduping on raw_key exactly like the old rows-populating
+ * version did), and returns the parsed rows so the caller can seed
+ * raw.db/relations.db with them. Not held onto anywhere after that — see
+ * the IIFE this feeds below.
+ */
+function load() {
+  const out = [];
+  for (const r of parseDataFile()) {
+    const k = keyOf(r);
+    if (!seen.has(k)) { seen.add(k); out.push(r); }
+  }
+  return out;
+}
+
+/**
+ * Append [text] to [filePath] and fsync before returning — appendFileSync
+ * alone only guarantees the OS page cache has it, not the disk. Retries a few
+ * times on the same transient Windows file-lock class (EPERM/EBUSY/EACCES)
+ * atomicWriteFileSync already has to handle (see its comment for how that was
+ * found); a persistent failure still throws, which is the point — ingest()'s
+ * caller must not admit these rows as "durable" if this doesn't return clean.
+ */
+function appendDurable(filePath, text, { retries = 5, retryDelayMs = 150 } = {}) {
+  for (let attempt = 1; ; attempt++) {
     try {
-      const r = JSON.parse(t);
-      const k = keyOf(r);
-      if (!seen.has(k)) { seen.add(k); rows.push(r); }
-    } catch { /* skip */ }
+      const fd = fs.openSync(filePath, "a");
+      try {
+        fs.writeSync(fd, text);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return;
+    } catch (e) {
+      const retryable = e.code === "EPERM" || e.code === "EBUSY" || e.code === "EACCES";
+      if (!retryable || attempt >= retries) throw e;
+      console.error(`[ingest] append attempt ${attempt} to ${filePath} got ${e.code}, retrying...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelayMs);
+    }
   }
 }
 
+/**
+ * Ingests a batch, durably, and returns the id through which the caller can
+ * honestly acknowledge receipt (see /ingest's handler — this is Phase 1 of
+ * docs/ARCHITECTURE_CHANGE_REQUEST.md, rebuilt to actually hold the guarantee
+ * its own comment used to just assert).
+ *
+ * Two things this fixes, both about `seen`/`rows` being the phone's proof that
+ * a row is durably stored:
+ *
+ *  1. The old code added every new row to `seen`/`rows` BEFORE the append that
+ *     was supposed to persist them. If that append then threw — disk full, a
+ *     permission error, anything — the exception propagated up and the client
+ *     correctly saw a failure, EXCEPT the rows were already marked "seen" in
+ *     memory. A retry of the identical batch would then find every row
+ *     already in `seen`, write nothing, and the handler would happily ack the
+ *     resubmitted batch's ids as durable — a full 200 for a batch that was
+ *     never actually on disk. Rows here only enter `seen`/`rows` AFTER
+ *     appendDurable() returns without throwing, so a failed attempt leaves
+ *     nothing to falsely "remember" and a retry behaves like a first try.
+ *
+ *  2. The ack itself: `ackThroughId` only ever reflects ids from THIS array —
+ *     freshly persisted just now, or already `seen` from a prior successful
+ *     call for the SAME rows (so a duplicate resubmission still acks
+ *     correctly without writing twice). It intentionally has no fallback to
+ *     the store's overall max id. `rows` mixes ids from independent
+ *     producers with no shared numbering — the phone's own small sequential
+ *     SQLite autoincrement ids alongside the ADB/legacy scrapers' much larger
+ *     Date.now()*1000+i ids — and acking against whichever happens to be
+ *     largest across the whole store let one device's/producer's id
+ *     authorize pruning local rows a completely different device never
+ *     actually uploaded. A batch with nothing to durably vouch for now acks
+ *     0, not "whatever the biggest id in the store happens to be."
+ */
 function ingest(arr) {
-  const fresh = [];
+  const candidates = [];
+  const candidateKeys = [];
+  let ackThroughId = null;
+
   for (const r of arr) {
     if (r == null || r.id == null) continue;
     const k = keyOf(r);
-    if (seen.has(k)) continue;
-    seen.add(k); rows.push(r); fresh.push(r);
+    const n = Number(r.id);
+    const idUsable = !Number.isNaN(n);
+    if (seen.has(k)) {
+      // Already durable from a prior call — fine to vouch for again.
+      if (idUsable && (ackThroughId === null || n > ackThroughId)) ackThroughId = n;
+      continue;
+    }
+    candidates.push(r);
+    candidateKeys.push(k);
   }
-  if (fresh.length) {
-    fs.appendFileSync(DATA_FILE, fresh.map((r) => JSON.stringify(r)).join("\n") + "\n");
+
+  if (candidates.length) {
+    const text = candidates.map((r) => JSON.stringify(r)).join("\n") + "\n";
+    // Throws straight out of ingest() on failure — nothing below runs, and
+    // critically nothing above has touched `seen`/`rows` for these rows yet.
+    appendDurable(DATA_FILE, text);
+
+    for (let i = 0; i < candidates.length; i++) seen.add(candidateKeys[i]);
+    for (const r of candidates) {
+      const n = Number(r.id);
+      if (!Number.isNaN(n) && (ackThroughId === null || n > ackThroughId)) ackThroughId = n;
+    }
+    // Keep the raw.db mirror in lock-step with `seen` (see G-19, raw-store.mjs)
+    // — same "don't let a fold failure block the response that's already
+    // durably true" reasoning as the relations.db fold below. Note this is
+    // NOT what makes a row durable — appendDurable() above already did that;
+    // this only keeps the queryable mirror in sync with what's now on disk.
+    try { insertRawRows(RAWDB, candidates, keyOf); } catch (e) { console.error("[raw-store] mirror failed:", e.message); }
     // incrementally fold the new rows into the relational DB
-    try { reindex(RDB, fresh); } catch (e) { console.error("[relations] fold failed:", e.message); }
-    broadcast("new", { count: fresh.length, total: rows.length, sample: fresh.slice(-3) });
+    try { reindex(RDB, candidates); } catch (e) { console.error("[relations] fold failed:", e.message); }
+    broadcast("new", { count: candidates.length, total: countRawRows(RAWDB), sample: candidates.slice(-3) });
   }
-  return fresh.length;
+
+  return { fresh: candidates, ackThroughId: ackThroughId ?? 0 };
 }
 
-load();
-console.error(`[notikeeper-mcp] loaded ${rows.length} rows from ${DATA_FILE}`);
+// One-time startup bootstrap. `initialRows` lives only inside this IIFE —
+// unlike the old module-level `rows` array, nothing keeps it (or a renamed
+// copy of it) resident after this block finishes; it's eligible for GC the
+// moment the IIFE returns. See G-19.
+const RAWDB = openRawDb(path.join(__dirname, "raw.db"));
+(function bootstrapRawDb() {
+  const initialRows = load();
+  console.error(`[notikeeper-mcp] loaded ${initialRows.length} rows from ${DATA_FILE}`);
+  insertRawRows(RAWDB, initialRows, keyOf);
+  const mirrored = countRawRows(RAWDB);
+  const log = mirrored === initialRows.length ? console.error : console.warn;
+  log(`[notikeeper-mcp] raw.db mirror: ${mirrored}/${initialRows.length} rows` +
+    (mirrored === initialRows.length ? "" : " — MISMATCH, investigate before relying on this store"));
+})();
 
-// Relational DB — derived view over data.jsonl
+// Relational DB — derived view over data.jsonl. Sourced from raw.db (see
+// allRawRows), not a resident `rows` array — relations.db is itself a fully
+// disposable, rebuildable-from-scratch derived cache (see G-12's commit for
+// the same reasoning applied to the users-table migration), so it's fine for
+// this specific path to trust raw.db rather than needing the stronger
+// never-trust-a-possibly-drifted-mirror guarantee dedupCleanup() below holds
+// itself to — nothing here can destroy data that isn't itself disposable.
 const RDB = openDb(path.join(__dirname, "relations.db"));
 function rebuildRelations() {
-  const result = reindex(RDB, rows);
+  const result = reindex(RDB, allRawRows(RAWDB));
   console.error(`[notikeeper-mcp] relations: +${result.inserted} (${result.threads} threads, ${result.users} users)`);
   return result;
 }
@@ -122,17 +289,97 @@ rebuildRelations();
 // Some notifications (spam/promo channels especially) repost the exact same
 // text over and over with a new timestamp each time, so the id+time dedup key
 // in ingest() never catches them. This removes exact (pkg, title, side, text)
-// duplicates down to one copy — never a fuzzy/heuristic match, so it can't
-// mistake two different real messages for the same spam blast. Nothing is
-// ever hard-deleted: every removed row is archived to DEDUP_LOG_FILE first,
-// so this is always reversible.
+// duplicates down to one copy, but ONLY among rows the noise classifier
+// (noise.mjs) already flags as not a meaningful message — never a fuzzy match,
+// and never applied to anything that looks like a real conversation, so it
+// can't mistake two genuinely separate messages for the same spam blast
+// (see dedupCleanup's own comment for why that distinction matters — it used
+// to run over every row with no such restriction). Nothing is ever
+// hard-deleted: every removed row is archived to DEDUP_LOG_FILE first, so
+// this is always reversible.
 const DEDUP_LOG_FILE = path.join(__dirname, "dedup-removed.jsonl");
 const DEDUP_SRC_PRIORITY = { scrape: 1, noti: 2, screen: 3 };
 const dedupSrcPri = (s) => DEDUP_SRC_PRIORITY[s] ?? 4;
 
+/**
+ * Replace `filePath`'s content without ever leaving it truncated or partial.
+ *
+ * A plain fs.writeFileSync opens the target with O_TRUNC and writes into it in
+ * place — a crash, a full disk, or a killed process partway through leaves
+ * whatever fraction had been flushed, and the rest (often most of the file, for
+ * something this size) is gone. DATA_FILE is the one archive this whole system
+ * is built around; dedupCleanup rewrites the entire thing every hour, and it is
+ * also the phone's documented recovery path (see NotiStore.kt's DB-open catch).
+ * Losing it to an interrupted write would take out the whole loop.
+ *
+ * Write to a sibling temp file, fsync it so the bytes are actually on stable
+ * storage rather than sitting in a buffer, then rename over the real path.
+ * rename() replaces the destination as a single filesystem operation — the
+ * reader-visible file is either fully the old content or fully the new content,
+ * never a mix — on both POSIX and Windows (verified here; Windows historically
+ * required MOVEFILE_REPLACE_EXISTING for this, which is what libuv/Node use).
+ *
+ * Trade-off found while verifying this: on Windows, unlike a plain in-place
+ * write, rename() over a destination that some *other* process has open (an
+ * editor with data.jsonl open to look at it, an AV scan, a backup tool taking
+ * a snapshot) fails with EPERM rather than just succeeding around it — a real,
+ * easily-reproduced case, not a hypothetical. Retrying a few times rides out
+ * the transient ones; the caller still needs to handle a persistent failure
+ * without crashing (see dedupCleanup, which now writes before mutating any
+ * in-memory state so a failure here leaves disk and memory equally untouched).
+ */
+function atomicWriteFileSync(filePath, content, { retries = 5, retryDelayMs = 150 } = {}) {
+  const tmpPath = `${filePath}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+  const fd = fs.openSync(tmpPath, "w");
+  try {
+    fs.writeSync(fd, content);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.renameSync(tmpPath, filePath);
+      return;
+    } catch (e) {
+      const retryable = e.code === "EPERM" || e.code === "EBUSY" || e.code === "EACCES";
+      if (!retryable || attempt >= retries) {
+        try { fs.unlinkSync(tmpPath); } catch { /* best effort */ }
+        throw e;
+      }
+      console.error(`[atomic-write] ${filePath}: rename attempt ${attempt} got ${e.code}, retrying...`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, retryDelayMs);
+    }
+  }
+}
+
 function dedupCleanup() {
+  // Reads DATA_FILE directly — the primary source of truth — rather than
+  // raw.db. raw.db is kept in sync via best-effort writes that are allowed
+  // to fail without blocking an /ingest response (see ingest()'s comment on
+  // insertRawRows); trusting it here, where the result gets written BACK
+  // over data.jsonl, would mean a rare raw.db-specific hiccup could bake
+  // itself in as permanent data loss the next time this runs. See G-19 and
+  // allRawRows' own doc comment in raw-store.mjs for the same distinction
+  // applied to rebuildRelations(), where trusting raw.db is fine because
+  // relations.db is fully disposable and this isn't.
+  const currentRows = parseDataFile();
+
   const groups = new Map();
-  for (const r of rows) {
+  for (const r of currentRows) {
+    // Only rows the noise classifier already treats as not a meaningful
+    // message — promo blasts, system spam, sticker/URL reposts, generic-title
+    // chrome — are even eligible to be grouped here. This used to run over
+    // EVERY row unconditionally with no time bound at all, which meant two
+    // entirely separate, genuine occurrences of a short reply like "ครับ"
+    // anywhere across the archive's whole history collapsed down to one, with
+    // no trace beyond an entry in dedup-removed.jsonl. A real message from a
+    // real person, however many times they've sent it, is never eligible for
+    // this pass now, regardless of how much text or time separates the two
+    // occurrences — this is the one dimension where being wrong is
+    // irreversible (see the capture-to-archive integrity audit, G-06).
+    if (!isNoise(r)) continue;
     const key = `${r.pkg || ""}|${r.title || ""}|${r.side || ""}|${r.text || ""}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(r);
@@ -151,8 +398,14 @@ function dedupCleanup() {
   }
   if (toRemove.size === 0) return { removed: 0, groups: 0 };
 
-  const removedRows = rows.filter((r) => toRemove.has(keyOf(r)));
-  const keptRows = rows.filter((r) => !toRemove.has(keyOf(r)));
+  // One pass building both arrays, not two separate .filter() calls over the
+  // same (potentially large) array — see G-19 ("dedup builds three more
+  // full copies").
+  const removedRows = [];
+  const keptRows = [];
+  for (const r of currentRows) {
+    (toRemove.has(keyOf(r)) ? removedRows : keptRows).push(r);
+  }
 
   // Archive BEFORE touching the active store — the log is the undo path.
   const archiveLines = removedRows
@@ -160,11 +413,38 @@ function dedupCleanup() {
     .join("\n") + "\n";
   fs.appendFileSync(DEDUP_LOG_FILE, archiveLines);
 
-  rows.length = 0;
-  rows.push(...keptRows);
-  seen.clear();
-  for (const r of rows) seen.add(keyOf(r));
-  fs.writeFileSync(DATA_FILE, keptRows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  // Write the new archive BEFORE touching `seen` or either mirror. If this
+  // throws (a persistent Windows file lock outlasting atomicWriteFileSync's
+  // retries, a full disk, ...), nothing below runs — `seen`, raw.db, and
+  // relations.db all stay exactly as they were, still matching what's on
+  // disk, rather than racing ahead to a deduped state the file itself was
+  // never updated to reflect. Not caught here: propagates out of
+  // dedupCleanup so every caller (startup, the hourly timer, POST
+  // /api/dedup/rebuild) sees this pass failed.
+  try {
+    atomicWriteFileSync(DATA_FILE, keptRows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  } catch (e) {
+    console.error(`[dedup] FAILED to write ${path.basename(DATA_FILE)} - keeping the old file, skipping this pass: ${e.message}`);
+    return { removed: 0, groups: 0, error: e.message };
+  }
+
+  // A removed row's raw_key is no longer durable — drop it from `seen` so a
+  // genuine future resubmission of that exact row (unlikely, but possible:
+  // a retried old upload batch, a re-scrape) is treated as new rather than
+  // silently swallowed as "already seen" against a row that no longer
+  // exists. Equivalent to the old code's `seen.clear()` + rebuild from the
+  // post-dedup rows array, just without needing that array to be resident
+  // to rebuild from.
+  for (const r of removedRows) seen.delete(keyOf(r));
+
+  // Keep raw.db's mirror consistent with the file write above — same
+  // reasoning as the incremental insert in ingest(). Uses server.mjs's own
+  // keyOf (raw_key), not relations.db's "source|id|time" format below —
+  // the two stores index the same rows under different, unrelated keys.
+  try {
+    const n = deleteRawRows(RAWDB, removedRows.map(keyOf));
+    console.error(`[dedup] raw.db: deleted ${n} rows`);
+  } catch (e) { console.error("[dedup] raw.db cleanup failed:", e.message); }
 
   // Purge the same rows from relations.db (Threads/Graph tabs, MCP tools) so
   // they don't keep showing duplicates reindex() would otherwise never remove.
@@ -181,12 +461,28 @@ function dedupCleanup() {
     `[dedup] removed ${removedRows.length} exact-duplicate rows across ${groupsAffected} groups ` +
     `(archived to ${path.basename(DEDUP_LOG_FILE)})`
   );
-  broadcast("dedup", { removed: removedRows.length, groups: groupsAffected, total: rows.length });
+  broadcast("dedup", { removed: removedRows.length, groups: groupsAffected, total: keptRows.length });
   return { removed: removedRows.length, groups: groupsAffected };
 }
 
-dedupCleanup(); // once at startup
-setInterval(dedupCleanup, 60 * 60 * 1000); // then hourly
+// dedupCleanup already turns a failed archive write into a logged no-op (see
+// above), but nothing guards the rest of the function — a bad grouping key, a
+// full disk on the DEDUP_LOG_FILE append, anything unanticipated. An uncaught
+// throw here is an uncaught throw at the top of the module / inside a timer
+// callback, and Node has no default recovery from either: it takes the whole
+// server down, ending notification capture along with whatever this pass
+// tripped over. A skipped dedup pass is fine — there's another one next hour.
+function runDedupCleanupSafely(reason) {
+  try {
+    return dedupCleanup();
+  } catch (e) {
+    console.error(`[dedup] pass (${reason}) failed unexpectedly, server stays up: ${e.stack || e.message}`);
+    return { removed: 0, groups: 0, error: e.message };
+  }
+}
+
+runDedupCleanupSafely("startup");
+setInterval(() => runDedupCleanupSafely("hourly"), 60 * 60 * 1000);
 
 /** Return the first private-LAN IPv4 address (e.g. 192.168.x.x or 10.x), skipping
  *  loopback, link-local, and the noisy 172.x ranges used by WSL/Hyper-V. */
@@ -214,46 +510,68 @@ function sendJson(res, code, obj, contentType = "application/json") {
   res.end(JSON.stringify(obj));
 }
 
-const isNoise = (r) => classifyNoise(r) !== null;
-
 // ---------- helpers used by every layer ----------
 const byNewest = (a, b) => b.time - a.time;
 
-function filterRows({ query, app, source, sinceMs, untilMs, sinceId, denoise = false }) {
-  const q = (query || "").toLowerCase();
-  const a = (app || "").toLowerCase();
-  return rows.filter((r) => {
-    if (sinceMs && r.time < sinceMs) return false;
-    if (untilMs && r.time >= untilMs) return false;
-    if (sinceId && !(Number(r.id) > sinceId)) return false;
-    if (source && r.source !== source) return false;
-    if (a && !(r.app || "").toLowerCase().includes(a)) return false;
-    if (q && !((r.text || "").toLowerCase().includes(q) ||
-               (r.title || "").toLowerCase().includes(q) ||
-               (r.app || "").toLowerCase().includes(q))) return false;
-    if (denoise && isNoise(r)) return false;
-    return true;
-  });
+// Thin wrapper kept so all four existing call sites (/api/messages,
+// /api/timeline, the search_messages and recent_messages MCP tools) migrate
+// onto raw.db together, from one change, rather than being individually
+// rewritten and individually able to drift out of sync with each other —
+// see G-19 and filterRawRows' own doc comment in raw-store.mjs. Was a
+// linear scan + filter over the in-memory `rows` array; now a real SQL
+// query against raw.db's indexed columns.
+function filterRows(opts) {
+  return filterRawRows(RAWDB, opts);
 }
 
-const fmt = (r) =>
-  `[${new Date(r.time).toLocaleString()}] ${r.app}` +
-  `${r.title ? " · " + r.title : ""}` +
-  `${r.side ? " (" + r.side + ")" : ""}: ${r.text}`;
+// source + a "~" time marker when the timestamp isn't a genuinely observed
+// one (see G-11/G-09 in the capture-to-archive integrity audit — this used
+// to render identically whether a row was a full scraped message or a
+// truncated notification preview, and whether its time was a real send time
+// or a capture-time guess; an AI reading this output had no way to tell).
+// r.time_exact === true is the only case treated as exact — undefined
+// (legacy rows from before this field existed) is honestly unknown, not
+// assumed exact.
+const fmt = (r) => {
+  const approx = r.time_exact === true ? "" : "~";
+  return `[${approx}${new Date(r.time).toLocaleString()}] ${r.app} · ${r.source}` +
+    `${r.title ? " · " + r.title : ""}` +
+    `${r.side ? " (" + r.side + ")" : ""}: ${r.text}`;
+};
 
 // ---------- HTTP server ----------
+/**
+ * Origins allowed to read this server's responses from browser JS. Same-origin
+ * requests (the dashboard fetching its own host:port) don't need this at all —
+ * browsers only consult it for *cross*-origin reads. A wildcard here meant any
+ * other page open in the same browser could fetch the archive's JSON and read
+ * it, gated only by knowing the token; reflecting a fixed allowlist instead
+ * means an unrelated origin's request is still answered (CORS is a browser-side
+ * read restriction, not a server-side access control — the auth gate already
+ * does that job) but the browser refuses to hand the response to that page's
+ * script. Recomputed per-request since getLanIp() can change if the network does.
+ */
+function allowedOrigins() {
+  const origins = [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`, `http://[::1]:${PORT}`];
+  if (!IS_LOOPBACK_ONLY) origins.push(`http://${getLanIp()}:${PORT}`);
+  return origins;
+}
+
 const httpServer = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // CORS for any cross-origin browser (e.g. opening dashboard from file://)
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins().includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  }
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   // 1) Upload endpoint (the phone POSTs here)
   if (req.method === "POST" && url.pathname === "/ingest") {
-    if (TOKEN && req.headers["authorization"] !== `Bearer ${TOKEN}`) {
+    if (req.headers["authorization"] !== `Bearer ${TOKEN}`) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
@@ -264,34 +582,45 @@ const httpServer = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => { body += c; if (body.length > 50_000_000) req.destroy(); });
     req.on("end", () => {
+      let batch;
       try {
         const parsed = JSON.parse(body);
-        const batch = Array.isArray(parsed) ? parsed : [parsed];
-        const n = ingest(batch);
-        if (deviceName) {
-          CONFIG.lastDevice = { name: deviceName, lastSeen: Date.now() };
-          saveConfig();
-        }
-        // Ack high-water mark (docs/ARCHITECTURE_CHANGE_REQUEST.md Phase 1): the
-        // batch is fsync'd to data.jsonl inside ingest() above, before this
-        // response goes out, so acking the batch's max id is durable — safe for
-        // the phone to treat as a prune floor. Falls back to the server's overall
-        // max id when the batch had none (e.g. all rows were malformed, or the
-        // batch was empty). `rows` is a single shared store with no per-device
-        // partition, so this fallback is only correct under the single-device
-        // deployment model this app is built for (see CLAUDE.md: "Personal-use
-        // tool for the device owner's own data"). If this ever becomes a
-        // multi-device tool, `rows`/ackedThroughId must be scoped per device
-        // before Phase 2 prune (NotiStore.pruneAcked) can keep trusting it —
-        // otherwise one device's ack could wrongly authorize pruning another
-        // device's un-acked local rows, since local row ids are independent
-        // per-install SQLite autoincrement counters, not a global sequence.
-        const ackedThroughId = maxId(batch) ?? maxId(rows) ?? 0;
-        sendJson(res, 200, { ok: true, received: n, total: rows.length, ackedThroughId });
-        console.error(`[notikeeper-mcp] ingested ${n} new (total ${rows.length})`);
+        batch = Array.isArray(parsed) ? parsed : [parsed];
       } catch (e) {
-        sendJson(res, 400, { error: String(e) });
+        sendJson(res, 400, { error: String(e) }); // malformed request — the client's problem
+        return;
       }
+
+      let result;
+      try {
+        result = ingest(batch);
+      } catch (e) {
+        // The durable write itself failed (disk full, a permission error, a
+        // lock that outlasted appendDurable's retries, ...) — not the
+        // client's fault, so 500, not 400. ingest() guarantees nothing in
+        // `batch` was admitted into `seen`/`rows` when it throws, so no ack
+        // goes out and the phone must not advance anything; retrying this
+        // exact batch later will attempt the write again rather than finding
+        // everything already "seen" and silently doing nothing (see
+        // ingest()'s doc comment — this is the failure mode that used to
+        // produce a false 200 ack for data that was never on disk).
+        console.error("[notikeeper-mcp] ingest FAILED, nothing durable for this batch:", e.message);
+        sendJson(res, 500, { error: String(e) });
+        return;
+      }
+
+      if (deviceName) {
+        CONFIG.lastDevice = { name: deviceName, lastSeen: Date.now() };
+        saveConfig();
+      }
+      // ackedThroughId comes straight from ingest() — every id in it is either
+      // freshly fsynced to disk just now, or was already durable from a prior
+      // successful call. See ingest()'s doc comment for why there is
+      // deliberately no fallback to the store's overall max id here anymore.
+      sendJson(res, 200, {
+        ok: true, received: result.fresh.length, total: countRawRows(RAWDB), ackedThroughId: result.ackThroughId,
+      });
+      console.error(`[notikeeper-mcp] ingested ${result.fresh.length} new (total ${countRawRows(RAWDB)})`);
     });
     return;
   }
@@ -313,10 +642,11 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  // Auth gate for every read API + the SSE stream — no-op unless NOTIKEEPER_TOKEN
-  // is set (matches /ingest's existing opt-in behavior). EventSource can't send
-  // custom headers, so a ?token= query param is accepted as well as the header.
-  if (TOKEN && (url.pathname.startsWith("/api/") || url.pathname === "/events")) {
+  // Auth gate for every read API + the SSE stream. Always on: TOKEN is resolved or
+  // generated at startup and is never empty, so there is no configuration in which
+  // these endpoints serve the archive unauthenticated. EventSource and <img> can't
+  // send custom headers, so a ?token= query param is accepted as well as the header.
+  if (url.pathname.startsWith("/api/") || url.pathname === "/events") {
     const authHeader = req.headers["authorization"];
     const queryToken = url.searchParams.get("token");
     if (authHeader !== `Bearer ${TOKEN}` && queryToken !== TOKEN) {
@@ -340,7 +670,7 @@ const httpServer = http.createServer((req, res) => {
       sinceId: parseInt(url.searchParams.get("sinceId") || "0", 10) || 0,
       denoise: url.searchParams.get("denoise") === "1",
     }).sort(byNewest).slice(0, limit);
-    sendJson(res, 200, { total: filtered.length, all: rows.length, rows: filtered }, "application/json; charset=utf-8");
+    sendJson(res, 200, { total: filtered.length, all: countRawRows(RAWDB), rows: filtered }, "application/json; charset=utf-8");
     return;
   }
 
@@ -406,30 +736,62 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/api/stats") {
-    const byApp = {}, bySource = {}, byNoise = {}, byPkg = {};
-    let min = Infinity, max = -Infinity, noiseCount = 0;
-    for (const r of rows) {
-      byApp[r.app] = (byApp[r.app] || 0) + 1;
-      bySource[r.source] = (bySource[r.source] || 0) + 1;
-      if (r.pkg) {
-        if (!byPkg[r.pkg]) byPkg[r.pkg] = { app: r.app, count: 0 };
-        byPkg[r.pkg].count++;
-      }
-      if (r.time < min) min = r.time;
-      if (r.time > max) max = r.time;
-      const tag = classifyNoise(r);
+    // Sourced from raw.db, not the in-memory `rows` array — see G-19 in the
+    // capture-to-archive integrity audit and raw-store.mjs's own doc
+    // comment. total/byApp/bySource/byPkg/minTime/maxTime are all real
+    // indexed SQL aggregates now, not a JS reduction over every row in
+    // memory. byNoise/noiseCount still need one pass over every row's full
+    // shape (classifyNoise takes the whole object, not something SQL can
+    // evaluate) — same total cost as before, but reading raw_json back out
+    // of the DB via .iterate() rather than requiring `rows` to be resident
+    // for this endpoint's sake specifically.
+    //
+    // Two intentional, minor differences from the old in-memory version,
+    // both edge cases that shouldn't occur against a healthy archive:
+    //  - A row with a genuinely missing `app` grouped under the JS object
+    //    key "undefined" before (r.app coerced by property-access syntax);
+    //    it groups under SQL NULL here, surfaced as the key "null" instead.
+    //  - byApp's tie-break for two apps with the exact same count used to
+    //    be "whichever was encountered first walking the in-memory array"
+    //    (an accident of insertion order, not a deliberate choice); it's
+    //    alphabetical now (ORDER BY n DESC, app ASC) — deterministic across
+    //    runs instead of dependent on ingest history.
+    const totals = RAWDB.prepare(
+      "SELECT COUNT(*) AS total, MIN(time) AS minTime, MAX(time) AS maxTime FROM raw_rows"
+    ).get();
+
+    const byApp = {};
+    for (const r of RAWDB.prepare(
+      "SELECT app, COUNT(*) AS n FROM raw_rows GROUP BY app ORDER BY n DESC, app ASC"
+    ).all()) byApp[r.app] = r.n;
+
+    const bySource = {};
+    for (const r of RAWDB.prepare(
+      "SELECT source, COUNT(*) AS n FROM raw_rows GROUP BY source ORDER BY source ASC"
+    ).all()) bySource[r.source] = r.n;
+
+    const byPkg = {};
+    for (const r of RAWDB.prepare(
+      "SELECT pkg, app, COUNT(*) AS n FROM raw_rows WHERE pkg IS NOT NULL AND pkg != '' GROUP BY pkg"
+    ).all()) byPkg[r.pkg] = { app: r.app, count: r.n };
+
+    let noiseCount = 0;
+    const byNoise = {};
+    for (const r of RAWDB.prepare("SELECT raw_json FROM raw_rows").iterate()) {
+      const tag = classifyNoise(JSON.parse(r.raw_json));
       if (tag) { noiseCount++; byNoise[tag] = (byNoise[tag] || 0) + 1; }
     }
+
     sendJson(res, 200, {
-      total: rows.length,
+      total: totals.total,
       noiseCount,
-      cleanCount: rows.length - noiseCount,
+      cleanCount: totals.total - noiseCount,
       byNoise,
-      byApp: Object.fromEntries(Object.entries(byApp).sort((a, b) => b[1] - a[1])),
+      byApp,
       byPkg,
       bySource,
-      minTime: rows.length ? min : null,
-      maxTime: rows.length ? max : null,
+      minTime: totals.total ? totals.minTime : null,
+      maxTime: totals.total ? totals.maxTime : null,
     }, "application/json; charset=utf-8");
     return;
   }
@@ -465,8 +827,8 @@ const httpServer = http.createServer((req, res) => {
   }
 
   if (req.method === "POST" && url.pathname === "/api/dedup/rebuild") {
-    const r = dedupCleanup();
-    sendJson(res, 200, { ok: true, ...r }, "application/json; charset=utf-8");
+    const r = runDedupCleanupSafely("manual");
+    sendJson(res, r.error ? 500 : 200, { ok: !r.error, ...r }, "application/json; charset=utf-8");
     return;
   }
 
@@ -700,7 +1062,11 @@ const httpServer = http.createServer((req, res) => {
   }
   if (req.method === "POST" && url.pathname === "/api/graph/hql") {
     let body = "";
-    req.on("data", (c) => { body += c; });
+    // HQL queries are short command strings (see the MCP tool's own examples) —
+    // this was the one POST body in the file with no cap at all, unlike /ingest
+    // (50 MB, real batches) and /api/config (100 KB). 20 KB is generous headroom
+    // over any real query while still bounding it.
+    req.on("data", (c) => { body += c; if (body.length > 20_000) req.destroy(); });
     req.on("end", () => {
       const q = (() => { try { return JSON.parse(body).query; } catch { return body; } })();
       graphHql(q).then(
@@ -724,6 +1090,10 @@ const httpServer = http.createServer((req, res) => {
       port: PORT,
       token: TOKEN || "",
       updateUrl,
+      // The endpoint above names a LAN address, which is only reachable when the
+      // server was started with NOTIKEEPER_BIND. Surfaced so a pairing UI can warn
+      // instead of handing the phone an endpoint that will silently never connect.
+      loopbackOnly: IS_LOOPBACK_ONLY,
       ...(CONFIG.captureApps.length ? { captureApps: CONFIG.captureApps } : {}),
     };
     sendJson(res, 200, payload, "application/json; charset=utf-8");
@@ -744,8 +1114,11 @@ const httpServer = http.createServer((req, res) => {
         const parsed = JSON.parse(body);
         if (Array.isArray(parsed.captureApps)) {
           CONFIG.captureApps = parsed.captureApps.filter((s) => typeof s === "string");
-          saveConfig();
         }
+        if (Array.isArray(parsed.ignoredNames)) {
+          CONFIG.ignoredNames = parsed.ignoredNames.filter((s) => typeof s === "string");
+        }
+        saveConfig();
         sendJson(res, 200, { ok: true, config: CONFIG });
       } catch (e) {
         sendJson(res, 400, { error: String(e) });
@@ -790,7 +1163,7 @@ const httpServer = http.createServer((req, res) => {
       "Connection": "keep-alive",
       "X-Accel-Buffering": "no",
     });
-    res.write(`event: hello\ndata: {"total":${rows.length}}\n\n`);
+    res.write(`event: hello\ndata: {"total":${countRawRows(RAWDB)}}\n\n`);
     sseClients.add(res);
     const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch {} }, 25000);
     req.on("close", () => { clearInterval(ping); sseClients.delete(res); });
@@ -800,9 +1173,20 @@ const httpServer = http.createServer((req, res) => {
   res.writeHead(404); res.end("not found");
 });
 
-httpServer.listen(PORT, () =>
-  console.error(`[notikeeper-mcp] HTTP on http://${BIND_HOST}:${PORT}  (dashboard /, ingest /ingest, events /events)`)
-);
+httpServer.listen(PORT, BIND_HOST, () => {
+  console.error(`[notikeeper-mcp] HTTP on http://${BIND_HOST}:${PORT}  (dashboard /, ingest /ingest, events /events)`);
+  if (IS_LOOPBACK_ONLY) {
+    console.error(
+      "[notikeeper-mcp] loopback only - the phone CANNOT upload to this server over Wi-Fi. " +
+      "Set NOTIKEEPER_BIND=0.0.0.0 (ideally with NOTIKEEPER_TOKEN) to allow it."
+    );
+  } else {
+    console.error(
+      `[notikeeper-mcp] reachable on ${BIND_HOST} - every request needs the token in ${path.basename(TOKEN_FILE)}. ` +
+      "Pair the phone from the dashboard to hand it over."
+    );
+  }
+});
 
 // ---------- MCP tools (same data, also exposed to Claude) ----------
 const mcp = new McpServer({ name: "notikeeper", version: "1.1.0" });
@@ -826,24 +1210,31 @@ mcp.tool(
 );
 
 mcp.tool("list_apps", {}, async () => {
-  const counts = {};
-  for (const r of rows) counts[r.app] = (counts[r.app] || 0) + 1;
-  const lines = Object.entries(counts).sort((a, b) => b[1] - a[1]).map(([a, c]) => `${a}: ${c}`);
+  // Sourced from raw.db, not the in-memory `rows` array — see G-19. Same
+  // per-app aggregate /api/stats's byApp already computes (Wave 16); tie
+  // order is alphabetical (ORDER BY n DESC, app ASC) rather than whatever
+  // order `rows` happened to encounter apps in, for the same reason.
+  const counts = RAWDB.prepare(
+    "SELECT app, COUNT(*) AS n FROM raw_rows GROUP BY app ORDER BY n DESC, app ASC"
+  ).all();
+  const lines = counts.map((r) => `${r.app}: ${r.n}`);
   return { content: [{ type: "text", text: lines.join("\n") || "no data" }] };
 });
 
 mcp.tool("stats", {}, async () => {
+  // Sourced from raw.db, not the in-memory `rows` array — see G-19.
+  const totals = RAWDB.prepare(
+    "SELECT COUNT(*) AS total, MIN(time) AS minTime, MAX(time) AS maxTime FROM raw_rows"
+  ).get();
   const bySource = {};
-  let min = Infinity, max = -Infinity;
-  for (const r of rows) {
-    bySource[r.source] = (bySource[r.source] || 0) + 1;
-    if (r.time < min) min = r.time;
-    if (r.time > max) max = r.time;
-  }
+  for (const r of RAWDB.prepare(
+    "SELECT source, COUNT(*) AS n FROM raw_rows GROUP BY source ORDER BY source ASC"
+  ).all()) bySource[r.source] = r.n;
+
   const text = [
-    `total rows: ${rows.length}`,
+    `total rows: ${totals.total}`,
     `by source: ${JSON.stringify(bySource)}`,
-    rows.length ? `range: ${new Date(min).toLocaleString()} -> ${new Date(max).toLocaleString()}` : "range: -",
+    totals.total ? `range: ${new Date(totals.minTime).toLocaleString()} -> ${new Date(totals.maxTime).toLocaleString()}` : "range: -",
     `dashboard: http://${LOCALHOST}:${PORT}/`,
     `data file: ${DATA_FILE}`,
   ].join("\n");
@@ -852,13 +1243,24 @@ mcp.tool("stats", {}, async () => {
 
 // ===== Semantic / graph tools (Phase B: BGE-M3 1024d + GenesisBlock) =====
 
-/** Format a hybridSearch / neighbors hit for Claude — readable text line. */
+/**
+ * Format a hybridSearch / neighbors hit for Claude — readable text line.
+ *
+ * Reads p.source directly rather than matching against n.labels the way this
+ * used to (`labels.find(l => l === "Notification" || l === "ScreenLine")`) —
+ * that list was two source values behind current: adding "ScrapedMessage"
+ * and "UnknownSource" to sourceLabel() (see G-22) would have silently
+ * produced an empty tag for exactly the rows G-22 was about, the same class
+ * of bug this whole function exists to prevent. props.source is the raw
+ * value already, so there's nothing to keep in sync.
+ */
 function fmtHit(hit) {
   const n = hit.node || hit;
   const p = n.props || {};
-  const time = p.time ? new Date(p.time).toLocaleString() : "";
+  const approx = p.time_exact === 1 ? "" : "~";
+  const time = p.time ? approx + new Date(p.time).toLocaleString() : "";
   const where = p.thread_id ? `t:${p.thread_id}` : "";
-  const tag = (n.labels || []).find((l) => l === "Notification" || l === "ScreenLine") || "";
+  const tag = p.source || "";
   const score = hit.score != null ? ` (score=${hit.score.toFixed(3)})` : "";
   return `[${time}] ${n.id} ${tag} ${where}${score}: ${p.text ?? p.name ?? ""}`.trim();
 }
@@ -987,12 +1389,110 @@ mcp.tool(
     const t = getThread(RDB, id, { limit });
     if (!t) return { content: [{ type: "text", text: "thread not found" }] };
     const head = `Thread #${t.id} [${t.app}] "${t.name}" — ${t.message_count} msgs, participants: ${t.participants.map(p => p.name).join(", ")}`;
+    // Includes source and a time_exact marker — this is the tool's own doc
+    // comment's evidence citation for G-11: getThread already selected
+    // m.source, this loop just never printed it, so a scraped message and a
+    // notification preview rendered identically. "?" for m.sender already
+    // covers unknown authorship reasonably (see G-14) — untouched here.
     const lines = t.messages.map((m) => {
-      const time = new Date(m.time).toLocaleString();
+      const approx = m.time_exact === 1 ? "" : "~";
+      const time = approx + new Date(m.time).toLocaleString();
       const who = m.side === "me" ? "me" : (m.sender || "?");
-      return `[${time}] ${who}: ${m.text}`;
+      return `[${time}] ${m.source} ${who}: ${m.text}`;
     });
     return { content: [{ type: "text", text: head + "\n" + lines.join("\n") }] };
+  }
+);
+
+mcp.tool(
+  "link_thread_alias",
+  {
+    canonicalThreadId: z.number().describe(
+      "Thread id to keep as the conversation's current identity — its history " +
+      "will include the alias thread's messages too."
+    ),
+    aliasThreadId: z.number().describe(
+      "Older thread id being folded in — e.g. the conversation's name before a rename."
+    ),
+    reason: z.string().optional().describe(
+      "Why these are the same conversation, e.g. \"renamed 'Family' -> 'Family 2024'\""
+    ),
+  },
+  // See G-13 in the capture-to-archive integrity audit: a renamed
+  // conversation starts a brand-new thread row with no automatic link back
+  // to its history under the old name, and nothing in the capture pipeline
+  // carries a stable app-internal conversation id that would let a rename be
+  // told apart from "coincidentally the same name, actually a different
+  // conversation" by inference — so this is never inferred automatically,
+  // only recorded when asked. Use thread_summary/list_apps or hql first to
+  // find both thread ids.
+  async ({ canonicalThreadId, aliasThreadId, reason }) => {
+    try {
+      const result = linkThreadAlias(RDB, canonicalThreadId, aliasThreadId, reason || null);
+      return {
+        content: [{
+          type: "text",
+          text: `Linked: thread ${result.aliasThreadId} now folds into thread ${result.threadId}. ` +
+            `thread_summary on ${result.threadId} will include both histories from now on.`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "find_cross_stream_duplicates",
+  {
+    threadId: z.number().describe("Thread id to scan — use thread_summary/list_apps or hql first to find it."),
+    windowMs: z.number().optional().describe("How close in time two messages must be to be considered the same event. Default 180000 (3 minutes)."),
+  },
+  // See G-20 in the capture-to-archive integrity audit: the same real-world
+  // message often lands as two unlinked rows — a notification's preview and
+  // the screen reader's (or scraper's) fuller capture of the same moment.
+  // This only ever SURFACES candidate pairs (different source, close in
+  // time, one message's text a prefix of the other's or identical) for
+  // review — it never asserts they're the same message. Confirm a real pair
+  // with link_messages; a pair that turns out to be two genuinely different
+  // messages just... isn't linked, no action needed.
+  async ({ threadId, windowMs }) => {
+    try {
+      const pairs = findCrossStreamDuplicates(RDB, threadId, windowMs ? { windowMs } : {});
+      if (!pairs.length) return { content: [{ type: "text", text: "no candidate pairs found" }] };
+      const lines = pairs.map((p) =>
+        `#${p.id1} [${p.source1}] "${p.text1}" (${new Date(p.time1).toLocaleString()})\n` +
+        `  ~ #${p.id2} [${p.source2}] "${p.text2}" (${new Date(p.time2).toLocaleString()})`
+      );
+      return { content: [{ type: "text", text: `${pairs.length} candidate pair(s):\n\n${lines.join("\n\n")}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
+  }
+);
+
+mcp.tool(
+  "link_messages",
+  {
+    canonicalId: z.number().describe("Message id to keep as the canonical record of this event."),
+    duplicateId: z.number().describe("The other stream's message id, confirmed to be the same real-world event."),
+    reason: z.string().optional().describe("Why these are the same message, e.g. \"notification preview of the screen-captured message\""),
+  },
+  // Only ever asserted from outside (typically after reviewing
+  // find_cross_stream_duplicates' output) — see G-20. Neither message is
+  // deleted or hidden; this just records the relationship.
+  async ({ canonicalId, duplicateId, reason }) => {
+    try {
+      const result = linkMessages(RDB, canonicalId, duplicateId, reason || null);
+      return {
+        content: [{
+          type: "text",
+          text: `Linked: message ${result.duplicateId} marked as a duplicate capture of message ${result.messageId}. Both rows stay in the archive.`,
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `error: ${e.message}` }] };
+    }
   }
 );
 

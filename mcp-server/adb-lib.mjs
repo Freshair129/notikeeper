@@ -1,3 +1,5 @@
+import { INGEST_TOKEN } from "./config.mjs";
+
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function decodeXmlEntities(s, decodeNewlines = false) {
@@ -50,12 +52,25 @@ export function detectLegacyTitle(nodes, height, chrome, fraction) {
   return top.find((node) => !chrome.has(node.text.trim()))?.text.trim() || "Messenger";
 }
 
+/** Bearer header for the local server, omitted when no token is configured. */
+const authHeader = () => (INGEST_TOKEN ? { Authorization: `Bearer ${INGEST_TOKEN}` } : {});
+
 export async function fetchExistingMessages(ingest, limit) {
-  try { const response = await fetch(`${ingest.replace("/ingest", "/api/messages")}?app=Messenger&limit=${limit}`); if (!response.ok) return new Set(); const body = await response.json(); return new Set((body.rows || []).map((message) => `${message.title}|${message.side}|${message.text}`)); }
-  catch { return new Set(); }
+  try {
+    const response = await fetch(`${ingest.replace("/ingest", "/api/messages")}?app=Messenger&limit=${limit}`, { headers: authHeader() });
+    // A 401 here used to look identical to "no history yet": the empty Set makes the
+    // caller treat every scraped line as new and re-post the lot. Say so instead.
+    if (response.status === 401) {
+      console.error("[adb-lib] /api/messages returned 401 - set INGEST_TOKEN or run from mcp-server/ so the token file is found. Re-scraping without dedup.");
+      return new Set();
+    }
+    if (!response.ok) return new Set();
+    const body = await response.json();
+    return new Set((body.rows || []).map((message) => `${message.title}|${message.side}|${message.text}`));
+  } catch { return new Set(); }
 }
 
 export async function postJsonIngest(ingest, payload) {
-  const response = await fetch(ingest, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const response = await fetch(ingest, { method: "POST", headers: { "Content-Type": "application/json", ...authHeader() }, body: JSON.stringify(payload) });
   return { response, body: await response.json().catch(() => ({})) };
 }

@@ -11,6 +11,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.Writer
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -20,40 +21,42 @@ import java.net.URLEncoder
  *  - share()           -> system share sheet (Google Drive, Gmail, Nearby, send-to-PC apps…)
  *  - saveToDownloads() -> a copy in the public Downloads folder
  *  - uploadJson()      -> POST to the user's own private endpoint
+ *
+ * share() and saveToDownloads() take a writer callback rather than a
+ * pre-built String: the export buttons drive NotiStore.allRows() (an
+ * uncapped, cursor-backed sequence) straight into the destination file, so a
+ * large archive never has to exist twice over in memory — once as rows, once
+ * as the whole serialized payload. uploadJson() still takes a String body:
+ * an HTTP POST needs one anyway, and its caller (the capped querySince/
+ * upload-batch path) is bounded by design, unlike export.
  */
 object Exporter {
 
-    fun itemsToJson(items: List<NotiItem>): String {
-        val arr = JSONArray()
-        for (it in items) {
-            arr.put(
-                JSONObject().apply {
-                    put("id", it.id)
-                    put("source", it.source)
-                    put("app", it.appName)
-                    put("pkg", it.pkg)
-                    put("title", it.title)
-                    put("text", it.text)
-                    put("side", it.side)
-                    put("time", it.postTime)
-                }
-            )
-        }
-        return arr.toString(2)
+    // time_exact/captured_at/extraction_version: snake_case on the wire to match
+    // scraper.mjs/adb-scraper.mjs's pre-existing time_exact field (see G-09/G-36
+    // in the capture-to-archive integrity audit) rather than introducing a second
+    // naming convention the server would need to reconcile. optNullable* omits
+    // the key entirely for a null value rather than writing JSON null, matching
+    // how absent fields already work for older/pre-migration rows.
+    private fun rowToJson(it: NotiItem): JSONObject = JSONObject().apply {
+        put("id", it.id)
+        put("source", it.source)
+        put("app", it.appName)
+        put("pkg", it.pkg)
+        put("title", it.title)
+        put("text", it.text)
+        put("side", it.side)
+        put("time", it.postTime)
+        put("time_exact", it.timeExact)
+        it.capturedAt?.let { c -> put("captured_at", c) }
+        it.extractionVersion?.let { v -> put("extraction_version", v) }
     }
 
-    fun itemsToCsv(items: List<NotiItem>): String {
-        val sb = StringBuilder("id,source,app,title,text,side,time\n")
-        for (it in items) {
-            sb.append(it.id).append(',')
-                .append(csv(it.source)).append(',')
-                .append(csv(it.appName)).append(',')
-                .append(csv(it.title)).append(',')
-                .append(csv(it.text)).append(',')
-                .append(csv(it.side)).append(',')
-                .append(it.postTime).append('\n')
-        }
-        return sb.toString()
+    /** Used by the upload path, which POSTs a bounded batch as one JSON body. */
+    fun itemsToJson(items: List<NotiItem>): String {
+        val arr = JSONArray()
+        for (it in items) arr.put(rowToJson(it))
+        return arr.toString(2)
     }
 
     private fun csv(s: String): String {
@@ -62,11 +65,71 @@ object Exporter {
         return if (needsQuote) "\"$escaped\"" else escaped
     }
 
-    /** Write to cache and fire the system share sheet. */
-    fun share(context: Context, fileName: String, mime: String, content: String) {
+    /** Streams [rows] to [writer] as a JSON array, one object at a time. Returns the row count. */
+    fun writeJsonRows(writer: Writer, rows: Sequence<NotiItem>): Int {
+        writer.write("[\n")
+        var count = 0
+        for (it in rows) {
+            if (count > 0) writer.write(",\n")
+            writer.write("  ")
+            writer.write(rowToJson(it).toString())
+            count++
+        }
+        writer.write(if (count > 0) "\n]" else "]")
+        return count
+    }
+
+    /** Streams [rows] to [writer] as CSV, one line at a time. Returns the row count. */
+    fun writeCsvRows(writer: Writer, rows: Sequence<NotiItem>): Int {
+        // pkg is in the JSON export (rowToJson) and in the iOS companion's own CSV
+        // writer (MessageStore.swift) but was missing here — the one field that
+        // actually distinguishes same-named apps/threads across packages, and
+        // without it a round-trip through this CSV can't reconstruct pkg at all.
+        // See G-23 in the capture-to-archive integrity audit.
+        writer.write("id,source,app,pkg,title,text,side,time,time_exact,captured_at,extraction_version\n")
+        var count = 0
+        for (it in rows) {
+            writer.write(it.id.toString())
+            writer.write(",")
+            writer.write(csv(it.source)); writer.write(",")
+            writer.write(csv(it.appName)); writer.write(",")
+            writer.write(csv(it.pkg)); writer.write(",")
+            writer.write(csv(it.title)); writer.write(",")
+            writer.write(csv(it.text)); writer.write(",")
+            writer.write(csv(it.side)); writer.write(",")
+            writer.write(it.postTime.toString()); writer.write(",")
+            writer.write(if (it.timeExact) "1" else "0"); writer.write(",")
+            writer.write(it.capturedAt?.toString() ?: ""); writer.write(",")
+            writer.write(it.extractionVersion?.toString() ?: "")
+            writer.write("\n")
+            count++
+        }
+        return count
+    }
+
+    /**
+     * Deletes everything currently in cacheDir/exports. There's no reliable
+     * "the app I shared to is done reading the file" callback from
+     * ACTION_SEND, so a just-shared file can't be deleted the instant the
+     * share sheet closes without risking deleting it out from under a
+     * receiving app that's still reading the stream. What this bounds instead
+     * is unbounded accumulation of decrypted plaintext (exports, the
+     * downloaded update APK) in app-private cache forever — every new export
+     * or update download starts by clearing whatever the previous one left
+     * behind, so at most one plaintext artifact lingers at a time instead of
+     * one per export/update ever run — see G-24 in the capture-to-archive
+     * integrity audit.
+     */
+    fun purgeCache(context: Context) {
+        File(context.cacheDir, "exports").listFiles()?.forEach { it.delete() }
+    }
+
+    /** Write to cache via [write] and fire the system share sheet. */
+    fun share(context: Context, fileName: String, mime: String, write: (Writer) -> Unit) {
         val dir = File(context.cacheDir, "exports").apply { mkdirs() }
+        purgeCache(context)
         val file = File(dir, fileName)
-        file.writeText(content)
+        file.bufferedWriter(Charsets.UTF_8).use(write)
         val uri = FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
         val send = Intent(Intent.ACTION_SEND).apply {
             type = mime
@@ -79,8 +142,8 @@ object Exporter {
         )
     }
 
-    /** Save a copy into the public Downloads folder. Returns true on success. */
-    fun saveToDownloads(context: Context, fileName: String, mime: String, content: String): Boolean =
+    /** Save a copy into the public Downloads folder via [write]. Returns true on success. */
+    fun saveToDownloads(context: Context, fileName: String, mime: String, write: (Writer) -> Unit): Boolean =
         runCatching {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, fileName)
@@ -90,7 +153,7 @@ object Exporter {
             val resolver = context.contentResolver
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: return false
-            resolver.openOutputStream(uri)?.use { it.write(content.toByteArray(Charsets.UTF_8)) }
+            resolver.openOutputStream(uri)?.bufferedWriter(Charsets.UTF_8)?.use(write)
             values.clear()
             values.put(MediaStore.Downloads.IS_PENDING, 0)
             resolver.update(uri, values, null, null)

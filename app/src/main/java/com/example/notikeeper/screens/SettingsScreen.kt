@@ -40,6 +40,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
@@ -355,13 +356,25 @@ private fun BackupExportScreen(onClose: () -> Unit) {
                 "แชร์ไปได้ทุกที่: Google Drive, อีเมล, Nearby, ส่งเข้าคอม ฯลฯ",
                 style = MaterialTheme.typography.bodySmall
             )
+            Text(
+                "⚠ ไฟล์ที่ส่งออกไม่ได้เข้ารหัส — ใครก็ตามที่เข้าถึงแอปปลายทางหรือโฟลเดอร์ " +
+                    "Downloads จะอ่านข้อความทั้งหมดได้ทันที",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
             Spacer(Modifier.height(10.dp))
             Button(
                 onClick = {
                     scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
                         AppLock.suppressNextLock = true
-                        Exporter.share(ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all))
+                        // Whole archive, uncapped (NotiStore.allRows — see its doc comment for why
+                        // this differs from querySince) streamed straight into the export file, so
+                        // the row count here doesn't bound how much can be shared out.
+                        withContext(Dispatchers.IO) {
+                            Exporter.share(ctx, "notikeeper.json", "application/json") { writer ->
+                                Exporter.writeJsonRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -370,9 +383,12 @@ private fun BackupExportScreen(onClose: () -> Unit) {
             Button(
                 onClick = {
                     scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
                         AppLock.suppressNextLock = true
-                        Exporter.share(ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all))
+                        withContext(Dispatchers.IO) {
+                            Exporter.share(ctx, "notikeeper.csv", "text/csv") { writer ->
+                                Exporter.writeCsvRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth()
@@ -381,14 +397,19 @@ private fun BackupExportScreen(onClose: () -> Unit) {
             OutlinedButton(
                 onClick = {
                     scope.launch {
-                        val all = withContext(Dispatchers.IO) { NotiStore.get(ctx).querySince(-1L) }
-                        val okJson = Exporter.saveToDownloads(
-                            ctx, "notikeeper.json", "application/json", Exporter.itemsToJson(all)
-                        )
-                        val okCsv = Exporter.saveToDownloads(
-                            ctx, "notikeeper.csv", "text/csv", Exporter.itemsToCsv(all)
-                        )
-                        status = if (okJson && okCsv) "บันทึกลง Downloads แล้ว (${all.size} รายการ)"
+                        var rowCount = 0
+                        val (okJson, okCsv) = withContext(Dispatchers.IO) {
+                            val json = Exporter.saveToDownloads(ctx, "notikeeper.json", "application/json") { writer ->
+                                rowCount = Exporter.writeJsonRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                            val csv = Exporter.saveToDownloads(ctx, "notikeeper.csv", "text/csv") { writer ->
+                                Exporter.writeCsvRows(writer, NotiStore.get(ctx).allRows())
+                            }
+                            json to csv
+                        }
+                        // rowCount is the true total — allRows() has no cap, so unlike before,
+                        // this count can never be a truncated fraction of the real archive.
+                        status = if (okJson && okCsv) "บันทึกลง Downloads แล้ว ($rowCount รายการ)"
                         else "บันทึกไม่สำเร็จ"
                     }
                 },
@@ -417,6 +438,11 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
     var status by remember { mutableStateOf("") }
     var apps by remember { mutableStateOf(emptyList<AppEntry>()) }
     val captureApps = remember { Settings.getCaptureApps(ctx) }
+    // A QR payload can silently redirect where future app updates are fetched
+    // from — see G-17 in the capture-to-archive integrity audit. Everything
+    // else a QR sets (endpoint, token, capture filter) is applied immediately,
+    // same as before; only a NEW updateUrl waits here for an explicit tap.
+    var pendingUpdateUrl by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         apps = withContext(Dispatchers.IO) { InstalledApps.scan(ctx, NotiStore.get(ctx).distinctApps()) }
@@ -447,8 +473,13 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
             apiUrl = endpoint!!
             Settings.setApiUrl(ctx, endpoint!!)
             if (token != null) { apiToken = token!!; Settings.setApiToken(ctx, token!!) }
-            if (update != null) { Settings.setUpdateUrl(ctx, update!!) }
             capturePkgs?.let { Settings.setCaptureApps(ctx, it) }
+            // Only hold updateUrl back for confirmation when the QR is actually
+            // proposing to CHANGE it — re-pairing with the same PC over and over
+            // shouldn't nag every time.
+            if (update != null && update != Settings.getUpdateUrl(ctx)) {
+                pendingUpdateUrl = update
+            }
             status = "ตั้งค่าเสร็จ — endpoint: $endpoint" +
                 (capturePkgs?.let { " · ตัวกรองการบันทึก ${it.size} แอปจาก PC" } ?: "")
             Toast.makeText(ctx, "Pair สำเร็จ", Toast.LENGTH_SHORT).show()
@@ -465,6 +496,27 @@ private fun DeviceConnectionScreen(onClose: () -> Unit) {
             )
         }
     ) { padding ->
+        pendingUpdateUrl?.let { proposedUrl ->
+            AlertDialog(
+                onDismissRequest = { pendingUpdateUrl = null },
+                title = { Text("เปลี่ยนแหล่งอัปเดตแอป?") },
+                text = {
+                    Text(
+                        "QR นี้ต้องการเปลี่ยน URL ที่แอปใช้ตรวจ/โหลดอัปเดตในอนาคต เป็น:\n\n$proposedUrl\n\n" +
+                            "ยืนยันเฉพาะถ้าคุณเชื่อถือแหล่งนี้ — การอัปเดตครั้งถัดไปจะโหลดจากที่นี่"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        Settings.setUpdateUrl(ctx, proposedUrl)
+                        pendingUpdateUrl = null
+                    }) { Text("ยืนยันเปลี่ยน") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingUpdateUrl = null }) { Text("ไม่เปลี่ยน") }
+                }
+            )
+        }
         Column(
             modifier = Modifier
                 .padding(padding)
@@ -683,7 +735,7 @@ private fun AboutUpdateScreen(onClose: () -> Unit) {
                                 updateStatus = "เป็นเวอร์ชันล่าสุดแล้ว (${BuildConfig.VERSION_NAME})"
                             } else {
                                 updateStatus = "พบเวอร์ชัน ${info.versionName} — กำลังดาวน์โหลด..."
-                                val f = Updater.download(ctx, info.apkUrl)
+                                val f = Updater.download(ctx, info.apkUrl, info.sha256)
                                 updateStatus = "กำลังเปิดตัวติดตั้ง..."
                                 Updater.install(ctx, f)
                             }

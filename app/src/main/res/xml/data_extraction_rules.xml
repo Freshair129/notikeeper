@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31+) cloud backup / device-transfer rules.
+
+  secure_store.xml holds the SQLCipher passphrase and all other settings,
+  wrapped with a non-exportable Android Keystore key. Keystore keys never
+  travel with a backup or device transfer, so if this file WERE restored on
+  a new install, its ciphertext would be undecryptable there (the historical
+  AEADBadTagException corruption bug) — excluding it here means a restore
+  simply starts fresh instead of restoring an unusable file. secure_prefs.xml
+  is the old (pre-migration) file name, excluded defensively in case a
+  backup happens mid-transition.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="secure_store.xml" />
+        <exclude domain="sharedpref" path="secure_prefs.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="secure_store.xml" />
+        <exclude domain="sharedpref" path="secure_prefs.xml" />
+    </device-transfer>
+</data-extraction-rules>

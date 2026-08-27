@@ -7,6 +7,7 @@ import android.media.AudioManager
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Eyes-free read-aloud for riders. Wraps Android TextToSpeech and ducks any
@@ -19,6 +20,15 @@ object Speaker {
     private var ready = false
     private var audio: AudioManager? = null
     private var focusRequest: AudioFocusRequest? = null
+
+    // text.hashCode() as an utterance id (the old scheme) can collide across
+    // wholly different messages — a 32-bit hash space, well within reach over
+    // the lifetime of a device that speaks every captured chat message — and
+    // onStart/onDone key off this id to pair duck/abandon calls. A collision
+    // mispairs those callbacks, and an utterance that gets replaced in the
+    // queue before ever starting can abandon focus that was never actually
+    // requested for it. A monotonic counter can't collide, ever — see G-39.
+    private val utteranceCounter = AtomicLong(0)
 
     @Synchronized
     fun init(context: Context) {
@@ -48,7 +58,7 @@ object Speaker {
         init(context)
         val engine = tts ?: return
         if (!ready) return
-        engine.speak(clean, TextToSpeech.QUEUE_ADD, null, "u" + clean.hashCode())
+        engine.speak(clean, TextToSpeech.QUEUE_ADD, null, "u" + utteranceCounter.getAndIncrement())
     }
 
     private fun requestDuck() {

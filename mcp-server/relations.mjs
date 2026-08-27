@@ -20,6 +20,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Sender prefix in noti / screen text — "John: hi" → ["John", "hi"]. */
 const SENDER_PREFIX_RE = /^([^:：\n]{1,40})[:：]\s+(.+)$/s;
 
+/**
+ * Every producer this pipeline actually controls (Exporter.kt, scraper.mjs,
+ * adb-scraper.mjs, fb-import.mjs's Facebook timestamp_ms) already sends
+ * genuine milliseconds. But nothing at the /ingest boundary has ever checked
+ * that — a second-precision source (10 digits, e.g. a raw external export
+ * like the yuzup_raw.json seen during the capture-to-archive integrity audit,
+ * G-27) would silently pass through as milliseconds and date every row to
+ * within a day of the Unix epoch. ms-epoch "now" is ~13 digits (1.7e12+);
+ * seconds-epoch "now" is ~10 digits (1.7e9-ish) — a value under 1e12 is
+ * unambiguously seconds, not milliseconds, with orders of magnitude of
+ * margin either way. Garbage (non-finite, <= 0) is left as-is: scaling a
+ * nonsense number into a different nonsense number isn't this function's job.
+ */
+function normalizeTimeMs(t) {
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return t;
+  return n < 1e12 ? Math.round(n * 1000) : n;
+}
+
 /** Words that look like UI chrome rather than real messages. */
 const CHROME_WORDS = new Set([
   // Status / chat UI
@@ -52,6 +71,24 @@ const UI_PATTERNS = [
   /^หน้าที่ \d+ จาก \d+/,
   /ขยายรูปภาพ$/,
   /(ย้|ย้อ|ย้อน)กลับ$/,                     // unicode-replaced variants of "ย้อนกลับ"
+  /^Send post/i,
+  /^Double tap to/i,
+  /^Button\.?/i,
+  /^Open chat head/i,
+  /^Create group chat/i,
+  /^เห็นเมื่อ \d+/i,
+  /^ส่งเมื่อ \d+/i,
+  /^ใช้งานเมื่อ \d+/i,
+  /^กำลังใช้งาน$/i,
+  /^การโทรด้วยเสียง/i,
+  /^เริ่มการโทร/i,
+  /^คอนเทนเนอร์/i,
+  /^ Replay$/i,
+  /โพสต์ photo \d+/i,
+  /โพสต์ video \d+/i,
+  /^Suggested Photo/i,
+  /^Sponsored Video/i,
+  /^Reel by/i,
 ];
 
 /** True if a label looks like UI chrome — short single line, no message-shape. */
@@ -60,7 +97,19 @@ function looksLikeChromeLabel(text) {
   if (!t) return true;
   if (isSharedChromeLabel(t) || CHROME_WORDS.has(t)) return true;
   if (t.length <= 2) return true;                       // single char / emoji button
-  if (/^[\p{L}]{1,16}$/u.test(t)) return true;          // single short word (no whitespace)
+  // "No whitespace -> one word -> probably a button label" only holds for
+  // scripts that use whitespace to separate words in the first place. Thai
+  // (also Lao, Khmer, Myanmar, CJK, ...) has no inter-word spaces even in
+  // completely ordinary sentences, so this rule used to classify a real,
+  // multi-word Thai message up to 16 characters as chrome and drop it from
+  // relations.db (and everything built on it — Threads, Graph, chatlog,
+  // every MCP tool) with no trace. Scoped to Latin script, the one family
+  // where the assumption is actually true — see G-08 in the capture-to-
+  // archive integrity audit. Thai UI chrome specifically is still caught:
+  // CHROME_WORDS and UI_PATTERNS above already carry an extensive
+  // Thai-specific list built up over several prior fixes, none of which
+  // depend on this whitespace heuristic.
+  if (/^\p{Script=Latin}{1,16}$/u.test(t)) return true;
   for (const re of UI_PATTERNS) if (re.test(t)) return true;
   return false;
 }
@@ -70,6 +119,7 @@ export function openDb(filePath) {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  migrateUserAppScope(db);
   // Detect whether the FTS index already exists *before* initSchema creates it,
   // so we only (re)build it when it was just created — either a fresh DB or an
   // older relations.db migrating up. (We can't compare row counts: count(*) on
@@ -79,7 +129,72 @@ export function openDb(filePath) {
     .get();
   initSchema(db);
   if (!ftsExisted) backfillFts(db);
+  migrateTimeExactColumn(db);
   return db;
+}
+
+/**
+ * Adds messages.time_exact to a relations.db that predates it (see G-09/G-36
+ * in the capture-to-archive integrity audit). `CREATE TABLE IF NOT EXISTS` in
+ * initSchema only helps a brand-new database — it never adds a column to a
+ * `messages` table that already exists — so an existing archive needs this
+ * explicit, guarded ALTER TABLE instead. Idempotent: checks PRAGMA
+ * table_info first and does nothing if the column is already there, so this
+ * is safe to call on every openDb() rather than needing its own version flag.
+ */
+function migrateTimeExactColumn(db) {
+  const hasColumn = db.prepare("PRAGMA table_info(messages)").all()
+    .some((c) => c.name === "time_exact");
+  if (!hasColumn) {
+    db.exec("ALTER TABLE messages ADD COLUMN time_exact INTEGER");
+  }
+}
+
+/**
+ * Pre-G-12, `users.name` was globally UNIQUE — two different real people
+ * happening to share a first name in two different apps (or even the same
+ * app) silently merged into one user row, one shared message_count, one
+ * shared identity. See G-12 in the capture-to-archive integrity audit.
+ * Fixing this changes the UNIQUE constraint itself (name -> app_id+name),
+ * which SQLite can't do with an additive ALTER TABLE, and there's no way to
+ * correctly un-merge already-collapsed cross-app identities from the merged
+ * aggregate alone (message_count/first_seen/last_seen no longer say which
+ * app contributed what). relations.db is a derived cache of data.jsonl,
+ * though, not the source of truth — server.mjs's rebuildRelations() already
+ * does a full reindex() of every row from data.jsonl unconditionally on
+ * every startup — so instead of trying to split merged rows in place, this
+ * detects the old schema and wipes every derived table, letting that
+ * already-existing full reindex regenerate them correctly-scoped from the
+ * raw archive, which still has every row's real `pkg`. Nothing here touches
+ * data.jsonl itself.
+ */
+function migrateUserAppScope(db) {
+  const usersExists = !!db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='users'")
+    .get();
+  if (!usersExists) return; // fresh database — initSchema below creates the current schema directly
+  const hasAppId = db.prepare("PRAGMA table_info(users)").all()
+    .some((c) => c.name === "app_id");
+  if (hasAppId) return; // already migrated
+
+  console.error(
+    "[relations] users table predates per-app identity scoping (G-12) — " +
+    "rebuilding derived tables from data.jsonl"
+  );
+  // Drop children before the tables they reference (foreign_keys is ON).
+  // The FTS triggers target `messages` specifically; dropped explicitly
+  // rather than assumed to go with it, since initSchema's CREATE TRIGGER IF
+  // NOT EXISTS would otherwise silently keep a stale trigger around.
+  db.exec(`
+    DROP TRIGGER IF EXISTS messages_fts_ai;
+    DROP TRIGGER IF EXISTS messages_fts_ad;
+    DROP TRIGGER IF EXISTS messages_fts_au;
+    DROP TABLE IF EXISTS messages_fts;
+    DROP TABLE IF EXISTS messages;
+    DROP TABLE IF EXISTS participants;
+    DROP TABLE IF EXISTS users;
+    DROP TABLE IF EXISTS threads;
+  `);
 }
 
 function initSchema(db) {
@@ -92,10 +207,13 @@ function initSchema(db) {
 
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
+      app_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
       first_seen INTEGER,
       last_seen  INTEGER,
-      message_count INTEGER DEFAULT 0
+      message_count INTEGER DEFAULT 0,
+      UNIQUE (app_id, name),
+      FOREIGN KEY (app_id) REFERENCES apps(id)
     );
 
     CREATE TABLE IF NOT EXISTS threads (
@@ -118,6 +236,30 @@ function initSchema(db) {
       FOREIGN KEY (user_id)   REFERENCES users(id)
     );
 
+    -- See G-13 in the capture-to-archive integrity audit: threads are keyed
+    -- on (app_id, name), so a renamed conversation (group title changed,
+    -- contact renamed) starts a brand-new thread row with no link back to
+    -- its history under the old name. None of the capture surfaces (a
+    -- notification's title, an accessibility-read screen's visible header)
+    -- carry a stable app-internal conversation id -- only ever the currently
+    -- displayed name -- so a rename can never be told apart from "this is
+    -- actually a different conversation that happens to share a name" by
+    -- inference alone; guessing either way risks silently merging two
+    -- unrelated people's histories, exactly the failure this table exists to
+    -- avoid. So this only ever records a link when something outside pure
+    -- inference asserts one (see linkThreadAlias) -- nothing populates it
+    -- automatically. alias_thread_id is the PRIMARY KEY: one alias thread
+    -- points at exactly one canonical thread, never a chain of aliases.
+    CREATE TABLE IF NOT EXISTS thread_aliases (
+      thread_id       INTEGER NOT NULL, -- canonical thread this alias folds into
+      alias_thread_id INTEGER NOT NULL PRIMARY KEY,
+      reason          TEXT,
+      created_at      INTEGER NOT NULL,
+      FOREIGN KEY (thread_id)       REFERENCES threads(id),
+      FOREIGN KEY (alias_thread_id) REFERENCES threads(id),
+      CHECK (thread_id != alias_thread_id)
+    );
+
     CREATE TABLE IF NOT EXISTS messages (
       id INTEGER PRIMARY KEY,
       thread_id INTEGER NOT NULL,
@@ -125,7 +267,13 @@ function initSchema(db) {
       side TEXT,                        -- "me" | "them" | NULL
       text TEXT NOT NULL,
       time INTEGER NOT NULL,
-      source TEXT NOT NULL,             -- "noti" | "screen"
+      source TEXT NOT NULL,             -- "noti" | "screen" | "scrape" | "adb-scrape"
+      -- Whether "time" is a genuinely observed time (1), a capture-time
+      -- approximation (0), or unknown because this row predates the column
+      -- (NULL) -- see G-09/G-36. Fed by the phone's own timeExact and by the
+      -- scrapers' pre-existing time_exact field, which used to be emitted
+      -- and then discarded at every downstream boundary.
+      time_exact INTEGER,
       reply_to_id INTEGER,
       read_at INTEGER,
       raw_id INTEGER,                   -- original id in data.jsonl
@@ -138,6 +286,34 @@ function initSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_msg_thread_time ON messages(thread_id, time);
     CREATE INDEX IF NOT EXISTS idx_msg_sender      ON messages(sender_id);
     CREATE INDEX IF NOT EXISTS idx_msg_time        ON messages(time);
+
+    -- See G-20 in the capture-to-archive integrity audit: the same
+    -- real-world message often lands as two separate, unlinked rows — a
+    -- notification's preview and the screen reader's (or scraper's) fuller
+    -- capture of the same conversation moment. Reliably telling apart
+    -- "these are the same event, captured twice" from "these are two
+    -- different, genuinely similar messages sent close together" from text
+    -- and timing alone carries real false-positive risk -- linking the
+    -- wrong pair would misrepresent two distinct messages as one. So, same
+    -- discipline as thread_aliases/G-13: nothing here is populated by
+    -- inference. findCrossStreamDuplicates() only ever SURFACES candidate
+    -- pairs for a human (or Claude, asked to look) to judge; linkMessages()
+    -- only ever RECORDS a link once something outside pure text/time
+    -- matching has actually confirmed one. Both rows always keep existing
+    -- independently — this never deletes or merges a message, only marks a
+    -- relationship between two that both stay in the archive as captured.
+    -- ON DELETE CASCADE: if a linked message is ever removed (e.g. a future
+    -- dedup pass), the stale link goes with it rather than either blocking
+    -- the delete or leaving a dangling reference.
+    CREATE TABLE IF NOT EXISTS message_links (
+      message_id   INTEGER NOT NULL, -- canonical message the duplicate folds into
+      duplicate_id INTEGER NOT NULL PRIMARY KEY,
+      reason       TEXT,
+      created_at   INTEGER NOT NULL,
+      FOREIGN KEY (message_id)   REFERENCES messages(id) ON DELETE CASCADE,
+      FOREIGN KEY (duplicate_id) REFERENCES messages(id) ON DELETE CASCADE,
+      CHECK (message_id != duplicate_id)
+    );
 
     -- Lexical (sparse) retrieval over message text. The 'trigram' tokenizer is
     -- the only FTS5 tokenizer that works for Thai/CJK (no whitespace word
@@ -211,9 +387,9 @@ function stmts(db) {
     upsertApp:  db.prepare(`INSERT INTO apps(name, pkg) VALUES(?, ?)
                            ON CONFLICT(name) DO UPDATE SET pkg=COALESCE(pkg, excluded.pkg)
                            RETURNING id`),
-    upsertUser: db.prepare(`INSERT INTO users(name, first_seen, last_seen, message_count)
-                           VALUES(?, ?, ?, 0)
-                           ON CONFLICT(name) DO UPDATE SET
+    upsertUser: db.prepare(`INSERT INTO users(app_id, name, first_seen, last_seen, message_count)
+                           VALUES(?, ?, ?, ?, 0)
+                           ON CONFLICT(app_id, name) DO UPDATE SET
                              first_seen = MIN(first_seen, excluded.first_seen),
                              last_seen  = MAX(last_seen,  excluded.last_seen)
                            RETURNING id`),
@@ -224,8 +400,8 @@ function stmts(db) {
                                last_msg  = MAX(last_msg,  excluded.last_msg)
                              RETURNING id, is_group`),
     insertMsg:  db.prepare(`INSERT OR IGNORE INTO messages
-                           (thread_id, sender_id, side, text, time, source, raw_id, raw_key)
-                           VALUES(?, ?, ?, ?, ?, ?, ?, ?)`),
+                           (thread_id, sender_id, side, text, time, source, time_exact, raw_id, raw_key)
+                           VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`),
     addParticipant: db.prepare(`INSERT OR IGNORE INTO participants(thread_id, user_id) VALUES(?, ?)`),
     incUserMsg: db.prepare(`UPDATE users SET message_count = message_count + 1,
                              last_seen = MAX(last_seen, ?) WHERE id = ?`),
@@ -252,11 +428,16 @@ function parseRow(r) {
   const text = (r.text || "").trim();
   const source = r.source;
   const side = r.side || null;
+  const time = normalizeTimeMs(r.time);
 
   if (!app || !text) return null;
   // Skip system app noise outright — these never carry real messages.
   if (["Meta App Manager", "Galaxy Store", "Samsung capture",
        "Dashboard Test", "HealthCheck"].includes(app)) return null;
+  // A capture-gap marker (see NotiStore.kt's insertGap, G-28/G-29) isn't a
+  // conversation and shouldn't create a thread/user of its own — it stays in
+  // the raw archive (data.jsonl) and the phone's own local Feed, just not here.
+  if (source === "gap") return null;
 
   // LLM quality-gate (Phase 4): for the short 1–2 word fragments the cheap
   // heuristic can't settle, a cached Chinda verdict overrides it. `false` =
@@ -279,10 +460,18 @@ function parseRow(r) {
   let threadName = title || "(no title)";
   let senderName = null;
 
+  // time_exact travels on the raw row itself now (Exporter.kt on the phone,
+  // scraper.mjs/adb-scraper.mjs on the PC — see G-09). A row from before any
+  // producer sent it defaults the same way NotiStore's own v2->v3 migration
+  // backfill does: a noti row's `time` has always been a genuine sbn.postTime;
+  // nothing else on this pipeline has ever had an actually observed time.
+  const timeExact = typeof r.time_exact === "boolean" ? (r.time_exact ? 1 : 0)
+    : source === "noti" ? 1 : 0;
+
   // ADB scraper supplies the real sender name (from Messenger's a11y description).
   if (r.sender && String(r.sender).trim()) {
     senderName = String(r.sender).trim();
-    return { app, pkg, threadName, senderName, text, time: r.time, source, side, rawId: r.id };
+    return { app, pkg, threadName, senderName, text, time, source, side, timeExact, rawId: r.id };
   }
 
   if (source === "noti") {
@@ -290,7 +479,6 @@ function parseRow(r) {
     const m = text.match(SENDER_PREFIX_RE);
     if (m) {
       senderName = m[1].trim();
-      // keep the unstripped text — we want the full content in the archive
     } else {
       senderName = title.trim() || null;
     }
@@ -299,14 +487,30 @@ function parseRow(r) {
     else if (side === "them") senderName = title.trim() || null;
   }
 
-  if (senderName === "" || senderName === title && side === "them") {
-    // okay, leave as-is
+  // Determine message side:
+  // - Already explicit (from screen-capture pixel inference) -> keep it as-is.
+  // - source === "noti" -> always "them": a notification is by definition
+  //   something arriving FROM someone else, not a structural guess.
+  // - No side AND a real sender name was found -> "them" is a safe inference;
+  //   nobody's own outgoing message gets attributed to a named sender.
+  // - No side AND no sender name -> genuinely no evidence either way. Rather
+  //   than default this to "me" (an extraction failure turned into a positive
+  //   claim that the device owner wrote a message they may never have sent —
+  //   see G-14 in the capture-to-archive integrity audit), unknown authorship
+  //   stays unknown: side stays null, which the schema already allows —
+  //   "me" | "them" | NULL.
+  let finalSide = side;
+  if (source === "noti") {
+    finalSide = "them";
+  } else if (!finalSide) {
+    finalSide = senderName ? "them" : null;
   }
+
   if (senderName) {
     if (senderName.length > 60) senderName = senderName.slice(0, 60);
   }
 
-  return { app, pkg, threadName, senderName, text, time: r.time, source, side, rawId: r.id };
+  return { app, pkg, threadName, senderName, text, time, source, side: finalSide, timeExact, rawId: r.id };
 }
 
 /** ETL the full rows list. Skips rows already imported via raw_key. Returns counts. */
@@ -318,18 +522,20 @@ export function reindex(db, rows) {
     for (const r of batch) {
       const parsed = parseRow(r);
       if (!parsed) { skipped++; continue; }
-      const { app, pkg, threadName, senderName, text, time, source, side, rawId } = parsed;
+      const { app, pkg, threadName, senderName, text, time, source, side, timeExact, rawId } = parsed;
       const rawKey = `${source}|${rawId}|${time}`;
 
       const appRow = s.upsertApp.get(app, pkg || null);
       const thread = s.upsertThread.get(appRow.id, threadName, time, time);
       let senderId = null;
       if (senderName) {
-        const u = s.upsertUser.get(senderName, time, time);
+        // Scoped to the app the message came from — see G-12: the same
+        // name in two different apps is not assumed to be the same person.
+        const u = s.upsertUser.get(appRow.id, senderName, time, time);
         senderId = u.id;
         s.addParticipant.run(thread.id, senderId);
       }
-      const info = s.insertMsg.run(thread.id, senderId, side, text, time, source, rawId, rawKey);
+      const info = s.insertMsg.run(thread.id, senderId, side, text, time, source, timeExact, rawId, rawKey);
       if (info.changes === 1) {
         inserted++;
         if (senderId != null) s.incUserMsg.run(time, senderId);
@@ -424,14 +630,168 @@ export function deleteMessages(db, rawKeys) {
   return { deleted, threadsUpdated: threadIds.size, usersUpdated: userIds.size };
 }
 
+/**
+ * Records that [aliasThreadId]'s history belongs to [canonicalThreadId] —
+ * typically "this old thread is the same conversation under its previous
+ * name" — see G-13 and thread_aliases' own doc comment in initSchema for why
+ * this is only ever asserted from outside, never inferred. Both thread rows
+ * keep existing independently (nothing is deleted or merged in place, unlike
+ * G-12's user-identity fix — a wrong alias here is meant to be correctable
+ * by calling this again with the right target, not something that destroys
+ * information if it turns out to be wrong). getThread/listThreads fold the
+ * alias in transparently once recorded.
+ *
+ * Chains are flattened automatically: if [canonicalThreadId] is itself
+ * already an alias of some other thread, the link is recorded against that
+ * ultimate target instead, so a lookup never has to walk more than one hop.
+ * Throws on a self-link, a nonexistent thread id on either side, or trying
+ * to alias a thread that other threads are already aliased to (would create
+ * a fork, not a chain — re-target those first if that's really the intent).
+ */
+export function linkThreadAlias(db, canonicalThreadId, aliasThreadId, reason = null) {
+  if (canonicalThreadId === aliasThreadId) {
+    throw new Error("a thread cannot be an alias of itself");
+  }
+  const exists = (id) => !!db.prepare("SELECT 1 FROM threads WHERE id = ?").get(id);
+  if (!exists(canonicalThreadId)) throw new Error(`no such thread: ${canonicalThreadId}`);
+  if (!exists(aliasThreadId)) throw new Error(`no such thread: ${aliasThreadId}`);
+
+  const isAliasedElsewhere = db
+    .prepare("SELECT thread_id FROM thread_aliases WHERE alias_thread_id = ?")
+    .get(aliasThreadId);
+  if (isAliasedElsewhere && isAliasedElsewhere.thread_id !== canonicalThreadId) {
+    throw new Error(
+      `thread ${aliasThreadId} is already aliased to ${isAliasedElsewhere.thread_id} — ` +
+      `link that thread instead of re-pointing an existing alias`
+    );
+  }
+
+  // Flatten: if the target is itself an alias, record against ITS canonical
+  // thread instead, so getThread never needs to walk more than one hop.
+  const targetsAlias = db
+    .prepare("SELECT thread_id FROM thread_aliases WHERE alias_thread_id = ?")
+    .get(canonicalThreadId);
+  const resolvedCanonical = targetsAlias ? targetsAlias.thread_id : canonicalThreadId;
+  if (resolvedCanonical === aliasThreadId) {
+    throw new Error("linking these threads would create a cycle");
+  }
+
+  // [aliasThreadId] may itself already be the canonical target of OTHER
+  // aliases (someone renamed A -> B, recorded that, then this call is
+  // recording a later rename B -> C). Re-point those too, so no lookup ever
+  // has to walk more than the one hop getThread actually performs.
+  db.prepare(`UPDATE thread_aliases SET thread_id = ? WHERE thread_id = ?`)
+    .run(resolvedCanonical, aliasThreadId);
+
+  db.prepare(`
+    INSERT INTO thread_aliases(thread_id, alias_thread_id, reason, created_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(alias_thread_id) DO UPDATE SET
+      thread_id = excluded.thread_id, reason = excluded.reason, created_at = excluded.created_at
+  `).run(resolvedCanonical, aliasThreadId, reason, Date.now());
+
+  return { threadId: resolvedCanonical, aliasThreadId };
+}
+
+/**
+ * Finds message pairs in [threadId] that LOOK like the same real-world
+ * message captured twice, once per stream — see G-20 and message_links'
+ * own doc comment in initSchema for why this only ever surfaces candidates,
+ * never asserts a link itself. A pair qualifies when: different sources,
+ * within [windowMs] of each other (default 3 minutes — the same
+ * same-real-world-event granularity graph-index.mjs's buildTurns and
+ * NotiStore.kt's notiDedupKey both already use), and one message's text is
+ * either identical to or a literal prefix of the other's (the common shape
+ * of a notification preview vs. the fuller text a screen/scrape capture
+ * gets — checked with substr/length, not SQL LIKE, so a literal "%" or "_"
+ * in a message can't be misread as a wildcard). Already-linked messages are
+ * excluded, so re-running this after confirming some pairs only surfaces
+ * what's still unresolved.
+ */
+export function findCrossStreamDuplicates(db, threadId, { windowMs = 180_000 } = {}) {
+  return db.prepare(`
+    SELECT m1.id AS id1, m1.source AS source1, m1.text AS text1, m1.time AS time1, m1.side AS side1,
+           m2.id AS id2, m2.source AS source2, m2.text AS text2, m2.time AS time2, m2.side AS side2
+    FROM messages m1
+    JOIN messages m2
+      ON m2.thread_id = m1.thread_id
+      AND m2.id > m1.id
+      AND m2.source != m1.source
+      AND ABS(m2.time - m1.time) <= @windowMs
+    WHERE m1.thread_id = @threadId
+      AND (
+        m1.text = m2.text
+        OR substr(m1.text, 1, length(m2.text)) = m2.text
+        OR substr(m2.text, 1, length(m1.text)) = m1.text
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM message_links WHERE duplicate_id = m1.id OR duplicate_id = m2.id
+      )
+    ORDER BY m1.time
+  `).all({ threadId, windowMs });
+}
+
+/**
+ * Records that [duplicateId] is the same real-world message as
+ * [canonicalId], captured by a different stream — see G-20 and
+ * message_links' own doc comment in initSchema for why this is only ever
+ * asserted from outside (typically after reviewing findCrossStreamDuplicates'
+ * output), never inferred. Both message rows keep existing independently;
+ * nothing is deleted or merged. Same validation and chain-flattening shape
+ * as linkThreadAlias/G-13, adapted for messages instead of threads.
+ */
+export function linkMessages(db, canonicalId, duplicateId, reason = null) {
+  if (canonicalId === duplicateId) {
+    throw new Error("a message cannot be a duplicate of itself");
+  }
+  const exists = (id) => !!db.prepare("SELECT 1 FROM messages WHERE id = ?").get(id);
+  if (!exists(canonicalId)) throw new Error(`no such message: ${canonicalId}`);
+  if (!exists(duplicateId)) throw new Error(`no such message: ${duplicateId}`);
+
+  const isLinkedElsewhere = db
+    .prepare("SELECT message_id FROM message_links WHERE duplicate_id = ?")
+    .get(duplicateId);
+  if (isLinkedElsewhere && isLinkedElsewhere.message_id !== canonicalId) {
+    throw new Error(
+      `message ${duplicateId} is already linked to ${isLinkedElsewhere.message_id} — ` +
+      `link that message instead of re-pointing an existing link`
+    );
+  }
+
+  const targetIsLinked = db
+    .prepare("SELECT message_id FROM message_links WHERE duplicate_id = ?")
+    .get(canonicalId);
+  const resolvedCanonical = targetIsLinked ? targetIsLinked.message_id : canonicalId;
+  if (resolvedCanonical === duplicateId) {
+    throw new Error("linking these messages would create a cycle");
+  }
+
+  db.prepare(`UPDATE message_links SET message_id = ? WHERE message_id = ?`)
+    .run(resolvedCanonical, duplicateId);
+
+  db.prepare(`
+    INSERT INTO message_links(message_id, duplicate_id, reason, created_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(duplicate_id) DO UPDATE SET
+      message_id = excluded.message_id, reason = excluded.reason, created_at = excluded.created_at
+  `).run(resolvedCanonical, duplicateId, reason, Date.now());
+
+  return { messageId: resolvedCanonical, duplicateId };
+}
+
 // ---------- query helpers (used by HTTP endpoints) ----------
+// listThreads excludes threads that are now an alias of another thread (see
+// linkThreadAlias/G-13) — their history is reachable through the canonical
+// thread's getThread() result, so listing them too would show the same
+// conversation twice under two different names.
 export function listThreads(db, { app = null, limit = 200 } = {}) {
   let sql = `SELECT t.id, t.name, t.is_group, t.message_count, t.last_msg,
                     a.name AS app,
                     (SELECT text FROM messages WHERE thread_id = t.id ORDER BY time DESC LIMIT 1) AS last_text
-             FROM threads t JOIN apps a ON a.id = t.app_id`;
+             FROM threads t JOIN apps a ON a.id = t.app_id
+             WHERE t.id NOT IN (SELECT alias_thread_id FROM thread_aliases)`;
   const params = [];
-  if (app) { sql += ` WHERE a.name = ?`; params.push(app); }
+  if (app) { sql += ` AND a.name = ?`; params.push(app); }
   sql += ` ORDER BY t.last_msg DESC LIMIT ?`;
   params.push(limit);
   return db.prepare(sql).all(...params);
@@ -444,24 +804,56 @@ export function getThread(db, id, { limit = 500 } = {}) {
     FROM threads t JOIN apps a ON a.id = t.app_id
     WHERE t.id = ?`).get(id);
   if (!t) return null;
+
+  // Fold in messages from any thread aliased into this one (a prior name
+  // for the same conversation, per G-13) so history reads as continuous
+  // across the rename without the underlying thread rows being merged.
+  const aliasedIds = db
+    .prepare("SELECT alias_thread_id AS id FROM thread_aliases WHERE thread_id = ?")
+    .all(id)
+    .map((r) => r.id);
+  const threadIds = [id, ...aliasedIds];
+  const placeholders = threadIds.map(() => "?").join(",");
+
+  // duplicateOfId: set when this message has been confirmed (via
+  // linkMessages, never inferred — see G-20) to be another stream's capture
+  // of the same real-world message as some other row here. Neither row is
+  // ever hidden or merged — this only annotates the relationship so a
+  // reader can tell the two apart from two genuinely separate messages.
   const messages = db.prepare(`
-    SELECT m.id, m.time, m.source, m.side, m.text, m.reply_to_id,
-           u.name AS sender
-    FROM messages m LEFT JOIN users u ON u.id = m.sender_id
-    WHERE m.thread_id = ?
-    ORDER BY m.time ASC LIMIT ?`).all(id, limit);
+    SELECT m.id, m.time, m.source, m.side, m.text, m.reply_to_id, m.time_exact,
+           u.name AS sender, ml.message_id AS duplicateOfId
+    FROM messages m
+    LEFT JOIN users u ON u.id = m.sender_id
+    LEFT JOIN message_links ml ON ml.duplicate_id = m.id
+    WHERE m.thread_id IN (${placeholders})
+    ORDER BY m.time ASC LIMIT ?`).all(...threadIds, limit);
+  // GROUP BY u.id: a participant who was in the conversation both before and
+  // after a rename appears in both threadIds' participant rows — collapse to
+  // one row per person rather than showing them twice.
   const participants = db.prepare(`
     SELECT u.id, u.name, u.message_count
     FROM participants p JOIN users u ON u.id = p.user_id
-    WHERE p.thread_id = ?
-    ORDER BY u.message_count DESC`).all(id);
-  return { ...t, participants, messages };
+    WHERE p.thread_id IN (${placeholders})
+    GROUP BY u.id
+    ORDER BY u.message_count DESC`).all(...threadIds);
+
+  const mergedFrom = aliasedIds.length
+    ? db.prepare(`SELECT id, name FROM threads WHERE id IN (${aliasedIds.map(() => "?").join(",")})`)
+        .all(...aliasedIds)
+    : [];
+
+  return { ...t, participants, messages, mergedFrom };
 }
 
 export function listUsers(db, { limit = 200 } = {}) {
+  // app included so two identically-named users in different apps (now
+  // correctly separate rows post-G-12) are actually distinguishable in the
+  // list, not just internally distinct by an id nothing here showed before.
   return db.prepare(`
-    SELECT id, name, message_count, first_seen, last_seen
-    FROM users ORDER BY message_count DESC LIMIT ?`).all(limit);
+    SELECT u.id, u.name, a.name AS app, u.message_count, u.first_seen, u.last_seen
+    FROM users u JOIN apps a ON a.id = u.app_id
+    ORDER BY u.message_count DESC LIMIT ?`).all(limit);
 }
 
 export function statsSummary(db) {

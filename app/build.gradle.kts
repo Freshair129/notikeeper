@@ -50,7 +50,11 @@ dependencies {
     implementation("net.zetetic:android-database-sqlcipher:4.5.4")
     implementation("androidx.sqlite:sqlite-ktx:2.4.0")
 
-    // Keystore-backed storage for the DB passphrase
+    // Deprecated (no further releases) — kept only so SecureStore's migration
+    // path can decrypt pre-existing installs' data on first run of this
+    // version. New reads/writes go through SecureStore's own Keystore code
+    // instead. Safe to remove once this install (and any others) have
+    // migrated — see data/SecureStore.kt.
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // App lock: fingerprint / device PIN
@@ -58,4 +62,11 @@ dependencies {
 
     // QR scanner (camera-based pairing)
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // Local (JVM, no device) unit tests — see app/src/test and G-33 in the
+    // capture-to-archive integrity audit. Deliberately just JUnit4, no
+    // Robolectric/Mockito: everything under test here (dedup key builders,
+    // CSV/JSON export, pure math helpers) was written or refactored to not
+    // touch the Android framework, so a device/emulator stub isn't needed.
+    testImplementation("junit:junit:4.13.2")
 }

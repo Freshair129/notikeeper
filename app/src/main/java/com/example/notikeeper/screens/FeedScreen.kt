@@ -40,9 +40,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -84,6 +86,7 @@ import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
 import android.widget.Toast
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -95,21 +98,73 @@ import java.util.Locale
 fun FeedScreen(onNavigateToSettings: () -> Unit) {
     val ctx = LocalContext.current
     var query by remember { mutableStateOf("") }
+    // debouncedQuery is what actually drives the DB query — see the two
+    // LaunchedEffects below. Typing "hello" no longer fires five separate
+    // full-table scans, one per keystroke (see G-18 in the capture-to-archive
+    // integrity audit).
+    var debouncedQuery by remember { mutableStateOf("") }
     var items by remember { mutableStateOf(emptyList<NotiItem>()) }
+    // Whether the most recently loaded page came back full (== QUERY_LIMIT) —
+    // the same "hit the cap" signal the truncation notice already used, now
+    // also driving whether "load more" is worth offering. A page shorter
+    // than the cap means the query genuinely ran out of matching rows, not
+    // just that this page's slice of them did. See G-18.
+    var hasMore by remember { mutableStateOf(false) }
+    var loadingMore by remember { mutableStateOf(false) }
     var selectedApp by remember { mutableStateOf<String?>(null) }
     var notiOn by remember { mutableStateOf(isNotiAccessEnabled(ctx)) }
     var readerOn by remember { mutableStateOf(isReaderEnabled(ctx)) }
     var refreshKey by remember { mutableStateOf(0) }
     var updateAvail by remember { mutableStateOf<UpdateInfo?>(null) }
+    val scope = rememberCoroutineScope()
+    // Row count to show in the wipe confirmation; null = dialog closed.
+    var confirmClearCount by remember { mutableStateOf<Long?>(null) }
+    // Set once if NotiStore.get() had to recover from an unreadable database
+    // (see NotiStore.lastRecoveryNotice); null = nothing to show / dismissed.
+    var recoveryNotice by remember { mutableStateOf<String?>(null) }
     val appNames = remember(items) { items.map { it.appName }.distinct().sorted() }
     val filteredItems = remember(items, selectedApp) {
         selectedApp?.let { app -> items.filter { it.appName == app } } ?: items
     }
 
-    LaunchedEffect(query, refreshKey) {
-        items = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(query) }
+    // Restarts (cancelling any still-pending delay) on every keystroke, so
+    // only the debounced value the user actually stopped typing at ever
+    // reaches a query — a keystroke never itself triggers a DB read.
+    LaunchedEffect(query) {
+        delay(300)
+        debouncedQuery = query
+    }
+
+    LaunchedEffect(debouncedQuery, refreshKey) {
+        val page = withContext(Dispatchers.IO) { NotiStore.get(ctx).query(debouncedQuery) }
+        items = page
+        hasMore = page.size == NotiStore.QUERY_LIMIT
         notiOn = isNotiAccessEnabled(ctx)
         readerOn = isReaderEnabled(ctx)
+        // NotiStore.get() above is what opens (and, on failure, recovers) the
+        // database — check right after, once, and clear it so it doesn't
+        // reappear on the next refresh/resume.
+        NotiStore.lastRecoveryNotice?.let {
+            recoveryNotice = it
+            NotiStore.clearRecoveryNotice()
+        }
+    }
+
+    // Keyset pagination past the first QUERY_LIMIT rows (G-18) — appends
+    // rather than replacing, cursored off the last (oldest, since ordering
+    // is postTime DESC, id DESC) row already loaded.
+    suspend fun loadMore() {
+        val last = items.lastOrNull() ?: return
+        loadingMore = true
+        try {
+            val page = withContext(Dispatchers.IO) {
+                NotiStore.get(ctx).query(debouncedQuery, before = Pair(last.postTime, last.id))
+            }
+            items = items + page
+            hasMore = page.size == NotiStore.QUERY_LIMIT
+        } finally {
+            loadingMore = false
+        }
     }
 
     LaunchedEffect(refreshKey) {
@@ -160,18 +215,63 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                 actions = {
                     TextButton(onClick = { refreshKey++ }) { Text("รีเฟรช") }
                     TextButton(onClick = {
-                        NotiStore.get(ctx).clear()
-                        refreshKey++
+                        scope.launch {
+                            confirmClearCount = withContext(Dispatchers.IO) { NotiStore.get(ctx).count() }
+                        }
                     }) { Text("ล้าง") }
                 }
             )
         }
     ) { padding ->
+        confirmClearCount?.let { total ->
+            AlertDialog(
+                onDismissRequest = { confirmClearCount = null },
+                title = { Text("ล้างข้อมูลทั้งหมด?") },
+                text = {
+                    Text(
+                        "จะลบข้อความและการแจ้งเตือนทั้งหมด $total รายการ ออกจากเครื่องนี้อย่างถาวร " +
+                            "กู้คืนไม่ได้ — ถ้ายังไม่ได้ซิงค์ขึ้น PC ข้อมูลจะหายไปเลย"
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        confirmClearCount = null
+                        scope.launch {
+                            withContext(Dispatchers.IO) { NotiStore.get(ctx).clear() }
+                            refreshKey++
+                        }
+                    }) { Text("ล้างทั้งหมด") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmClearCount = null }) { Text("ยกเลิก") }
+                }
+            )
+        }
         Column(
             modifier = Modifier
                 .padding(padding)
                 .fillMaxSize()
         ) {
+            recoveryNotice?.let { notice ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "แจ้งเตือนการกู้คืนฐานข้อมูล",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(notice, color = MaterialTheme.colorScheme.onErrorContainer)
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(onClick = { recoveryNotice = null }) { Text("รับทราบ") }
+                    }
+                }
+            }
             updateAvail?.let { info ->
                 Card(
                     modifier = Modifier
@@ -242,8 +342,34 @@ fun FeedScreen(onNavigateToSettings: () -> Unit) {
                     .fillMaxWidth()
                     .padding(12.dp)
             )
+            // hasMore (last page loaded came back exactly at QUERY_LIMIT) is
+            // the only signal available without a separate COUNT query — see
+            // NotiStore.QUERY_LIMIT's doc comment for the trade-off. Silence
+            // here is what G-18 originally flagged ("unlimited search" was
+            // never literally true and said nothing when it wasn't); now
+            // there's also a real way to actually see the rest, not just a
+            // warning to search more specifically.
+            if (hasMore) {
+                Text(
+                    "แสดง ${items.size} รายการที่ตรงกัน — มีรายการเก่ากว่านี้ กด \"โหลดเพิ่ม\" ด้านล่างเพื่อดูต่อ",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+            }
             LazyColumn(modifier = Modifier.fillMaxSize()) {
                 items(filteredItems) { item -> NotiRow(item) }
+                if (hasMore) {
+                    item {
+                        Button(
+                            onClick = { scope.launch { loadMore() } },
+                            enabled = !loadingMore,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp)
+                        ) { Text(if (loadingMore) "กำลังโหลด..." else "โหลดเพิ่ม") }
+                    }
+                }
             }
         }
     }

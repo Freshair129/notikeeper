@@ -37,6 +37,8 @@
                           │ – ingest endpoint         │    └──────────────────────────┘
                           │ – Claude tools:           │
                           │   search/recent/list/stats│
+                          │   /semantic/similar/graph │
+                          │   /hql/summary/link/dedup │
                           └───────────────────────────┘
 ```
 
@@ -57,11 +59,14 @@ together so the search UI can show both with context.
 ### Encrypted-at-rest, not just locked
 SQLCipher encrypts the whole DB file with AES-256, so a backup grab or rooted
 adversary sees ciphertext. The passphrase is 32 random bytes generated once
-and held in `EncryptedSharedPreferences` (master key in the Android Keystore,
-hardware-backed where available). Crucially the key is NOT tied to user
-authentication — the background services must be able to write while the app
-is locked. The biometric prompt protects the UI surface; encryption protects
-the file at rest. They are layered, not redundant.
+and held in `SecureStore`, a direct-Keystore AES-256-GCM store (Android
+Keystore, hardware-backed where available) in its own isolated file/alias
+separate from the app's other settings — replacing
+`androidx.security:security-crypto`'s `EncryptedSharedPreferences`, which
+Google deprecated with no releases past 1.1.0. Crucially the key is NOT tied
+to user authentication — the background services must be able to write while
+the app is locked. The biometric prompt protects the UI surface; encryption
+protects the file at rest. They are layered, not redundant.
 
 ### Why the read-aloud uses TTS, not VAD/STT
 The use case is *output* (eyes-free hearing), not input. Android's built-in
@@ -86,10 +91,15 @@ swap in a release signing config and store the keystore outside the repo.
 
 ## Data flow on the phone
 
-1. A notification arrives → `NotiLoggerService.onNotificationPosted` extracts
-   title + best-available body (`EXTRA_BIG_TEXT` > `EXTRA_TEXT_LINES` > `EXTRA_TEXT`),
-   skips ongoing/persistent notifications, and inserts a row with
-   `source = "noti"` and a dedupe key `noti:<title>:<text>:<time>`.
+1. A notification arrives → `NotiLoggerService.onNotificationPosted` first
+   tries `NotificationCompat.MessagingStyle` (real per-message sender +
+   timestamp, one row per message, `timeExact = true`); apps that don't use
+   that style fall through to title + best-available body
+   (`EXTRA_BIG_TEXT` > `EXTRA_TEXT_LINES` > `EXTRA_TEXT`). Ongoing/persistent
+   notifications are skipped, and every row gets `source = "noti"` and a
+   dedupe key `noti:<pkg>:<title>:<text>:<5-min time bucket>` (bucketed, not
+   exact-time, so a genuine repeat sent minutes apart isn't silently merged
+   with the notification that reposts itself seconds later).
 2. Inside Messenger/LINE/IG/etc., a screen update fires
    `MessengerReaderService.onAccessibilityEvent`. We debounce (500ms), walk
    the `AccessibilityNodeInfo` tree of `rootInActiveWindow`, and emit a
@@ -102,7 +112,14 @@ swap in a release signing config and store the keystore outside the repo.
    `NotiStore.query(filter)` for display.
 5. If auto-upload is configured, every resume tries
    `NotiStore.querySince(lastUploadedId)` and POSTs JSON to the user's
-   endpoint, advancing the high-water mark on 2xx.
+   endpoint. `lastUploadedId` (a local "what have I sent" pointer) advances
+   on any successful POST, but pruning is gated on a *separate*,
+   server-confirmed high-water mark: the response's own `ackedThroughId`
+   feeds `Settings.setPrunableThroughId`, which only ever moves forward.
+   Nothing is deleted from the phone unless the user has separately opted
+   into Phase 2 pruning (`Settings.getPruneEnabled`, off by default) — and
+   even then, only rows the server has durably acked *and* older than the
+   7-day retention floor.
 6. The updater runs the same way: `Updater.check` hits the configured
    `version.json` URL, surfaces a banner if `versionCode` is newer, and the
    user's button press downloads the APK and launches the system installer.

@@ -21,13 +21,29 @@
    D:\abuild\gradle\gradle-8.9\bin\gradle.bat -p G:\NotiKeeper assembleDebug
    ```
    ได้ไฟล์ที่ `app/build/outputs/apk/debug/app-debug.apk` → **เปลี่ยนชื่อเป็น `NotiKeeper.apk`**
-3. **แก้ `release/version.json`** ให้ `versionCode`/`versionName` ตรงกับที่ build + ใส่ `notes`
-4. **สร้าง GitHub Release** (tag เช่น `v1.6`) แล้ว **แนบไฟล์ 2 อัน**:
+3. **คำนวณ SHA-256 ของ APK** (แอปเวอร์ชันนี้ขึ้นไปจะตรวจค่านี้ก่อนติดตั้ง — ดู G-17 ใน
+   capture-to-archive integrity audit):
+   ```
+   certutil -hashfile NotiKeeper.apk SHA256
+   ```
+   (PowerShell ก็ใช้ `Get-FileHash NotiKeeper.apk -Algorithm SHA256` ได้เหมือนกัน)
+4. **แก้ `release/version.json`** ให้ `versionCode`/`versionName` ตรงกับที่ build + ใส่ `notes` +
+   ใส่ `sha256` เป็นค่าที่ได้จากขั้นตอนก่อนหน้า (ตัวพิมพ์เล็กทั้งหมด ไม่ต้องมีช่องว่าง):
+   ```json
+   { "versionCode": 18, "versionName": "1.3.0",
+     "url": "https://.../NotiKeeper.apk", "notes": "...",
+     "sha256": "<ค่าจาก certutil/Get-FileHash>" }
+   ```
+   ถ้าไม่ใส่ `sha256` แอปจะยังอัปเดตได้เหมือนเดิม แค่ข้ามการตรวจ — ใส่ทุกครั้งที่ทำได้
+5. **สร้าง GitHub Release** (tag เช่น `v1.6`) แล้ว **แนบไฟล์ 2 อัน**:
    - `NotiKeeper.apk`
    - `version.json`
-5. เสร็จ — เครื่องที่ลงเวอร์ชันเก่าจะเห็นการ์ด "มีเวอร์ชันใหม่" และกดอัปเดตได้
+6. เสร็จ — เครื่องที่ลงเวอร์ชันเก่าจะเห็นการ์ด "มีเวอร์ชันใหม่" และกดอัปเดตได้
 
 ## หมายเหตุ
 - repo แบบ **private** ต้องใช้ token ดาวน์โหลด — ใช้ **public** จะง่ายกว่ามากสำหรับ APK สาธารณะ
-- ถ้าไม่อยากใช้ GitHub ใช้ static host ไหนก็ได้ที่ให้ URL ตรงไปยัง `version.json` + `NotiKeeper.apk` (เช่น Cloudflare Pages, Netlify, S3)
+- ถ้าไม่อยากใช้ GitHub ใช้ static host ไหนก็ได้ที่ให้ URL ตรงไปยัง `version.json` + `NotiKeeper.apk` (เช่น Cloudflare Pages, Netlify, S3) — **ต้องเป็น HTTPS** ทั้งสอง URL แอปจะปฏิเสธ URL แบบ `http://` ตั้งแต่ขั้นตรวจอัปเดตเลย
 - การติดตั้งทับต้องเป็น APK ที่ลงนามด้วย key เดียวกัน — debug build ใช้ debug keystore เดียวกันทุกครั้งบนเครื่องนี้อยู่แล้ว จึงทับได้
+- `sha256` ป้องกันได้แค่ "ไฟล์ที่โหลดมาตรงกับที่ version.json บอก" — ถ้ามีคนแอบเปลี่ยนทั้ง APK และค่า
+  `sha256` ใน version.json พร้อมกัน (เช่น ยึด endpoint ได้) แอปจะตรวจผ่านอยู่ดี ตัวที่ป้องกันชั้นสุดท้าย
+  จริง ๆ คือ Android เองไม่ยอมติดตั้งทับแอปที่ลงนามด้วย key คนละอันกับที่ติดตั้งอยู่ (ดู SECURITY.md)
